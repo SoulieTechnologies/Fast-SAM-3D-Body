@@ -9,7 +9,7 @@
 <sup>†</sup> Joint corresponding authors
 
 <p align="center">
-  <a href="https://arxiv.org/abs/xxxx.xxxxx">
+  <a href="https://arxiv.org/abs/2603.15603">
     <img src="https://img.shields.io/badge/arXiv-Paper-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="Paper">
   </a>
   &nbsp;
