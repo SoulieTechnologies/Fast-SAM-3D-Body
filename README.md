@@ -114,7 +114,6 @@ We demonstrate a real-time, vision-only teleoperation system for the Unitree G1 
   journal={arXiv preprint arXiv:2603.15603},
   year={2026}
 }
-}
 ```
 
 ## Acknowledgements
