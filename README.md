@@ -108,10 +108,12 @@ We demonstrate a real-time, vision-only teleoperation system for the Unitree G1 
 ## Citation
 
 ```bibtex
-@inproceedings{fastsam3dbody2026,
+@article{yang2026fastsam3dbody,
   title={Fast SAM 3D Body: Accelerating SAM 3D Body for Real-Time Full-Body Human Mesh Recovery},
   author={Yang, Timing and He, Sicheng and Jing, Hongyi and Yang, Jiawei and Liu, Zhijian and Zou, Chuhang and Wang, Yue},
+  journal={arXiv preprint arXiv:2603.15603},
   year={2026}
+}
 }
 ```
 
