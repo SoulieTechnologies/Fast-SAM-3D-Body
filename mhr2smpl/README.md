@@ -131,20 +131,41 @@ The MHR repository (cloned in Step 2 above) contains the barycentric mapping and
 
 ### From the MHR repository
 
-Copy the barycentric mapping from the MHR repo (cloned in Step 2 above):
+The official MHR mapping file only contains `triangle_ids` and `baryc_coords`. Our code requires an additional `mhr_vert_ids` field (vertex indices expanded from triangle faces). Generate it as follows:
 
 ```bash
 MHR_REPO=./MHR
 
-# Barycentric mapping (MHR mesh → SMPL topology)
-cp ${MHR_REPO}/tools/mhr_smpl_conversion/assets/mhr2smpl_mapping.npz mhr2smpl/data/
+python3 -c "
+import numpy as np
+import trimesh
+
+# Load official mapping
+m = np.load('${MHR_REPO}/tools/mhr_smpl_conversion/assets/mhr2smpl_mapping.npz')
+
+# Load MHR mesh faces
+mesh = trimesh.load('${MHR_REPO}/tools/mhr_smpl_conversion/assets/mhr_face_mask.ply', process=False)
+
+# Expand triangle_ids into vertex indices
+mhr_vert_ids = mesh.faces[m['triangle_ids']]  # [6890, 3]
+
+# Save with all three fields
+np.savez(
+    'mhr2smpl/data/mhr2smpl_mapping.npz',
+    triangle_ids=m['triangle_ids'],
+    baryc_coords=m['baryc_coords'],
+    mhr_vert_ids=mhr_vert_ids,
+)
+print('Saved mhr2smpl/data/mhr2smpl_mapping.npz')
+"
 ```
 
 `SMPL_NEUTRAL.pkl` needs to be downloaded separately from [smplx](https://smpl-x.is.tue.mpg.de/) and placed in `mhr2smpl/data/`.
 
 The mapping file contains:
-- `mhr_vert_ids`: `[6890, 3]` — triangle vertex indices in MHR mesh for each SMPL vertex
-- `baryc_coords`: `[6890, 3]` — barycentric interpolation weights
+- `triangle_ids`: `[6890]` — triangle indices in MHR mesh for each SMPL vertex (from official MHR)
+- `baryc_coords`: `[6890, 3]` — barycentric interpolation weights (from official MHR)
+- `mhr_vert_ids`: `[6890, 3]` — triangle vertex indices expanded via `mesh.faces[triangle_ids]` (generated)
 
 ### Datasets (for training data collection)
 
