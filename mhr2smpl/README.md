@@ -125,7 +125,7 @@ The MHR repository (cloned in Step 2 above) contains the barycentric mapping and
 | File | Location | Source | Description |
 |------|----------|--------|-------------|
 | `SMPL_NEUTRAL.pkl` | `data/` | [smplx](https://smpl-x.is.tue.mpg.de/) | SMPL body model (neutral gender) |
-| `mhr2smpl_mapping.npz` | `data/` | [MHR](https://github.com/facebookresearch/MHR): `tools/mhr_smpl_conversion/assets/mhr2smpl_mapping.npz` | Precomputed barycentric mapping (MHR 18439 verts → SMPL 6890 verts) |
+| `mhr2smpl_mapping.npz` | `data/` | Generated from [MHR](https://github.com/facebookresearch/MHR) (see [below](#from-the-mhr-repository)) | Barycentric mapping with `mhr_vert_ids` (not the same as official file, needs generation) |
 | `smpl_vert_sample_indices.npy` | `data/` | Copy from `experiments/<exp>/sample_idx.npy` after training | 1500 vertex subsampling indices (same as `sample_idx.npy`) |
 | `amass_joints.npz` | `smooth/data/` | Preprocessed from [AMASS](https://amass.is.tue.mpg.de/) via `preprocess_amass.py` | Joint sequences for SmootherMLP training |
 
