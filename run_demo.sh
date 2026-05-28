@@ -8,7 +8,7 @@ export GPU_HAND_PREP=1              # GPU hand preprocessing (faster)
 export LAYER_DTYPE=fp32             # Layer dtype: fp32
 # Multi-person scenarios require fp32; sam3dbody defaults to fp32 as well
 export SKIP_KEYPOINT_PROMPT=1       # Skip keypoint prompt encoding
-export IMG_SIZE=512      #  384/448 # Input Backbone image size 448 (0=original 512)
+export IMG_SIZE=512      #  Faster Image Size = 384/448 # Input Backbone image size 448 (0=original 512)
 # Backbone+decoder IMG_SIZE defaults to 512; important -- too small leads to inaccurate predictions!
 
 # ============================================================
