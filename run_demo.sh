@@ -32,9 +32,9 @@ export MHR_USE_CUDA_GRAPH=0         # MHR CUDA Graph (0=off, 1=on)
 export KEYPOINT_PROMPT_INTERM_INTERVAL=999  # Keypoint prompt interval (999=disable)
 # export KEYPOINT_PROMPT_INTERM_LAYERS=0,1,2,3  # Specific layers for keypoint prompt
 
-export BODY_INTERM_PRED_LAYERS=0,1,2        # Body decoder intermediate layers 
+export BODY_INTERM_PRED_LAYERS=0,1,2        # Body decoder intermediate layers  (999=disable)
 # Fewer layers = faster decoder; reducing layers significantly improves speed. Optimal: 0,1,2
-export HAND_INTERM_PRED_LAYERS=0,1          # Hand decoder intermediate layers
+export HAND_INTERM_PRED_LAYERS=0,1          # Hand decoder intermediate layers (999=disable)
 # Fewer layers = faster decoder; reducing layers significantly improves speed. Optimal: 0,1
 
 # export INTERM_PRED_LAYERS=0,1,2,3         # Generic intermediate layers (overridden by BODY/HAND)
