@@ -1,4 +1,4 @@
-# Fast SAM 3D Body
+# [ECCV 2026] Fast SAM 3D Body
 
 ### Accelerating SAM 3D Body for Real-Time Full-Body Human Mesh Recovery
 
