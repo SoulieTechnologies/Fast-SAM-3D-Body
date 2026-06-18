@@ -1,6 +1,6 @@
-# [ECCV 2026] Fast SAM 3D Body
+# Fast SAM 3D Body
 
-### Accelerating SAM 3D Body for Real-Time Full-Body Human Mesh Recovery
+### [ECCV 2026] Accelerating SAM 3D Body for Real-Time Full-Body Human Mesh Recovery
 
 [Timing Yang](http://yangtiming.github.io)<sup>1</sup>, [Sicheng He](https://hesicheng.net)<sup>1</sup>, [Hongyi Jing](https://hongyijing.me)<sup>1</sup>, [Jiawei Yang](https://jiawei-yang.github.io)<sup>1</sup>, [Zhijian Liu](https://zhijianliu.com)<sup>2,3</sup>, [Chuhang Zou](https://zouchuhang.github.io)<sup>4</sup><sup>†</sup>, [Yue Wang](https://yuewang.xyz)<sup>1,3</sup><sup>†</sup>
 
