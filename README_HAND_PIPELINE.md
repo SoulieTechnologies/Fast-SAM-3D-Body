@@ -85,7 +85,8 @@ python realtime_extractor.py --source path/to/video.mp4 --output_dir out/ --head
 | `extract_video.py` | Full-quality offline extraction (hand decoder + refinement) |
 | `hand_only_extractor.py` | Hand decoder in isolation (for profiling finger quality) |
 | `visualize_skeleton_video.py` | Overlay a saved `(T,70,2/3)` skeleton on a video |
-| `extract_two_cameras.py`, `extract_dualgpu.py` | Two-camera triangulation → metric 3D (removes monocular scale ambiguity) |
+| `extract_two_cameras.py` | Two-camera triangulation → metric 3D (removes monocular scale ambiguity). Single-GPU, B2 hand refinement, full mono outputs — the reference version |
+| `extract_dualgpu.py` | Same triangulation, one view per GPU in true parallel (~2x faster, **needs 2 GPUs**; body-only, no B2 hands) |
 | `stream_demo.py`, `stream_client.py` | Live webcam → server inference → MJPEG browser stream |
 | `convert_backbone_tensorrt.py`, `convert_yolo_pose_trt.py` | TensorRT engine builders |
 | `profile_sam3d_stages.py` | Per-stage timing of the SAM3D model (backbone / decoders) |
