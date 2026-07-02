@@ -50,7 +50,7 @@ sys.path.insert(0, parent_dir)
 
 
 # Default paths
-CHECKPOINT_DIR = os.path.join(parent_dir, "checkpoints", "sam-3d-body-dinov3")
+CHECKPOINT_DIR = os.path.join(os.path.dirname(parent_dir), "checkpoints", "sam-3d-body-dinov3")
 TRT_OUTPUT_DIR = os.path.join(CHECKPOINT_DIR, "backbone_trt")
 ONNX_PATH = os.path.join(TRT_OUTPUT_DIR, "backbone_dinov3.onnx")
 TRT_PATH_BF16 = os.path.join(TRT_OUTPUT_DIR, "backbone_dinov3_bf16.engine")

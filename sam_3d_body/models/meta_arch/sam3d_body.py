@@ -37,6 +37,17 @@ _INTERM_DETAIL_TIMING = os.environ.get("INTERM_TIMING", "0") == "1"
 _INTERM_TIMING_WARMUP = 3
 _INTERM_TIMING_COUNT = [0]  # Use list to simulate mutable reference
 
+# Per-stage profiling. When off (default), the per-frame timing cuda.synchronize()
+# calls are skipped so stages pipeline freely. Enable with SAM3D_PROFILE=1 to get
+# accurate per-stage timings (at a small throughput cost).
+_PROFILE = os.environ.get("SAM3D_PROFILE", "0") == "1"
+
+
+def _psync():
+    """CUDA sync used only to bracket per-stage timing; no-op unless profiling."""
+    if _PROFILE:
+        torch.cuda.synchronize()
+
 
 def _sync_time():
     """Synchronize CUDA and return current time."""
@@ -2356,7 +2367,7 @@ class SAM3DBody(BaseModel):
         print(f"          [forward_pose_branch] ray_condition: {time.time() - t0:.4f}s")
 
         t0 = time.time()
-        torch.cuda.synchronize()
+        _psync()
 
         print(f"          [DEBUG] FOV input image size: {x.shape[2]}x{x.shape[3]} (H x W)")
         print(f"          [DEBUG] Model: SAM3DBody-Backbone ({self.cfg.MODEL.BACKBONE.TYPE}), input_dtype: {x.dtype}, compute_dtype: {self.backbone_dtype}")
@@ -2364,7 +2375,7 @@ class SAM3DBody(BaseModel):
         image_embeddings = self.backbone(
             x.type(self.backbone_dtype), extra_embed=ray_cond
         )  # (B, C, H, W)
-        torch.cuda.synchronize()
+        _psync()
         print(f"          [forward_pose_branch] backbone: {time.time() - t0:.4f}s")
 
         if isinstance(image_embeddings, tuple):
@@ -2433,7 +2444,7 @@ class SAM3DBody(BaseModel):
         elif need_body:
             # Only body decoder needed
             t0 = time.time()
-            torch.cuda.synchronize()
+            _psync()
             # Mark step begin to avoid CUDA graph tensor reuse conflicts
             torch.compiler.cudagraph_mark_step_begin()
             tokens_output, pose_output = self.forward_decoder(
@@ -2444,7 +2455,7 @@ class SAM3DBody(BaseModel):
                 condition_info=condition_info[self.body_batch_idx],
                 batch=batch,
             )
-            torch.cuda.synchronize()
+            _psync()
             print(f"          [forward_pose_branch] forward_decoder_body: {time.time() - t0:.4f}s")
             # When DO_INTERM_PREDS=True, pose_output is a list, take the last one
             # When DO_INTERM_PREDS=False, pose_output is already a dict
@@ -2505,6 +2516,79 @@ class SAM3DBody(BaseModel):
                 output["mhr_hand"]["hand_box"] = hand_coords_hand_batch
                 output["mhr_hand"]["hand_logits"] = hand_logits_hand_batch
 
+        return output
+
+    def forward_backbone_only(self, batch: Dict):
+        """Run data_preprocess + ray_cond + backbone + condition_info.
+
+        Returns (image_embeddings, condition_info, keypoints_prompt).
+        Modifies batch in-place to add 'ray_cond'.
+        Call _initialize_batch + set body_batch_idx before calling this.
+        """
+        batch_size, num_person = batch["img"].shape[:2]
+
+        x = self.data_preprocess(
+            self._flatten_person(batch["img"]),
+            crop_width=(self.cfg.MODEL.BACKBONE.TYPE in ["vit_hmr", "vit", "vit_b", "vit_l", "vit_hmr_512_384"]),
+        )
+
+        ray_cond = self.get_ray_condition(batch)
+        ray_cond = self._flatten_person(ray_cond)
+        if self.cfg.MODEL.BACKBONE.TYPE in ["vit_hmr", "vit", "vit_b", "vit_l"]:
+            ray_cond = ray_cond[:, :, :, 32:-32]
+        elif self.cfg.MODEL.BACKBONE.TYPE in ["vit_hmr_512_384"]:
+            ray_cond = ray_cond[:, :, :, 64:-64]
+        if len(self.body_batch_idx):
+            batch["ray_cond"] = ray_cond[self.body_batch_idx].clone()
+        if len(self.hand_batch_idx):
+            batch["ray_cond_hand"] = ray_cond[self.hand_batch_idx].clone()
+
+        image_embeddings = self.backbone(x.type(self.backbone_dtype), extra_embed=None)
+        if isinstance(image_embeddings, tuple):
+            image_embeddings = image_embeddings[-1]
+        image_embeddings = image_embeddings.type(x.dtype)
+
+        if self.cfg.MODEL.PROMPT_ENCODER.get("MASK_EMBED_TYPE", None) is not None:
+            if self.cfg.MODEL.PROMPT_ENCODER.get("MASK_PROMPT", "v1") == "v1":
+                image_embeddings = image_embeddings + self._get_mask_prompt(batch, image_embeddings)
+
+        condition_info = self._get_decoder_condition(batch)
+        keypoints_prompt = torch.zeros((batch_size * num_person, 1, 3)).to(batch["img"])
+        keypoints_prompt[:, :, -1] = -2
+
+        return image_embeddings, condition_info, keypoints_prompt
+
+    def forward_decoder_body(
+        self,
+        image_embeddings: torch.Tensor,
+        condition_info: torch.Tensor,
+        keypoints_prompt: torch.Tensor,
+        batch: Dict,
+    ) -> Dict:
+        """Run body decoder from pre-computed backbone embeddings.
+
+        image_embeddings, condition_info, keypoints_prompt and batch tensors
+        must all be on the same device as this model's decoder.
+        Call _initialize_batch + set body_batch_idx before calling this.
+        """
+        torch.compiler.cudagraph_mark_step_begin()
+        tokens_output, pose_output = self.forward_decoder(
+            image_embeddings[self.body_batch_idx],
+            init_estimate=None,
+            keypoints=keypoints_prompt[self.body_batch_idx],
+            prev_estimate=None,
+            condition_info=condition_info[self.body_batch_idx],
+            batch=batch,
+        )
+        if isinstance(pose_output, list):
+            pose_output = pose_output[-1]
+
+        output = {
+            "mhr": pose_output,
+            "mhr_hand": None,
+            "condition_info": condition_info,
+            "image_embeddings": image_embeddings,
+        }
         return output
 
     def forward_step(
@@ -2594,9 +2678,9 @@ class SAM3DBody(BaseModel):
 
         if inference_type == "body":
             t0 = time.time()
-            torch.cuda.synchronize()
+            _psync()
             pose_output = self.forward_step(batch, decoder_type="body")
-            torch.cuda.synchronize()
+            _psync()
             print(f"          [run_inference] forward_step_body: {time.time() - t0:.4f}s")
             print(f"        [run_inference] TOTAL: {time.time() - run_inference_start:.4f}s")
             return pose_output

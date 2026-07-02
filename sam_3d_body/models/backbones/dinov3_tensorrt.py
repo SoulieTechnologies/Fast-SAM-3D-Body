@@ -168,9 +168,15 @@ def create_tensorrt_backbone(
 
     config = model_configs.get(name, {"embed_dim": 1280, "patch_size": 16})
 
-    # Calculate output size based on default 512x512 input
+    # Calculate output size based on the engine's input size.
+    # TRT_INPUT_SIZE env var overrides (e.g. "256" for a 256x256 hand-crop engine),
+    # so the output feature-map buffer matches the smaller token grid (16x16 vs 32x32).
     image_size = kwargs.get("image_size", (512, 512))
+    _ts = os.environ.get("TRT_INPUT_SIZE")
+    if _ts:
+        image_size = (int(_ts), int(_ts))
     output_size = (image_size[0] // config["patch_size"], image_size[1] // config["patch_size"])
+    print(f"[create_tensorrt_backbone] input {image_size} -> output tokens {output_size}")
 
     return TRTDinov3Backbone(
         engine_path=engine_path,

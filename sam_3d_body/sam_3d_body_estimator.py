@@ -231,11 +231,6 @@ class SAM3DBodyEstimator:
         self.image_embeddings = None
         self.output = None
         self.prev_prompt = []
-        try:
-            torch.cuda.empty_cache()
-        except RuntimeError as e:
-            # If state is corrupted after CUDA Graph capture failure, skip empty_cache
-            print(f"        [process_one_image] Warning: empty_cache failed: {e}")
 
         t0 = time.time()
         if type(img) == str:
@@ -392,6 +387,14 @@ class SAM3DBodyEstimator:
                     "mask": masks[idx] if masks is not None else None,
                     "pred_joint_coords": out["pred_joint_coords"][idx],
                     "pred_global_rots": out["joint_global_rots"][idx],
+                    # Pixel-accurate YOLO-Pose COCO-17 keypoints (x, y, conf) when the
+                    # yolo_pose detector is used; None otherwise.  Aligned by detection
+                    # index (boxes are sorted consistently with keypoints upstream).
+                    "yolo_keypoints": (
+                        yolo_pose_keypoints[idx]
+                        if (yolo_pose_keypoints is not None and idx < len(yolo_pose_keypoints))
+                        else None
+                    ),
                 }
             )
 

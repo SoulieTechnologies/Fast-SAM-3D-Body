@@ -1,17 +1,44 @@
-# Python bytecode
+# ── Python ───────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
 *.pyc
+*.egg-info/
+.ipynb_checkpoints/
+.pytest_cache/
 
-# Ignore large model files but keep configs
-checkpoints/**/*.ckpt
-checkpoints/**/*.pt
-checkpoints/**/*.pth
-checkpoints/**/*.engine
-checkpoints/**/*.onnx
-checkpoints/**/*.trt
-checkpoints/**/*.plan
-checkpoints/**/*_trt/
+# ── Model weights / checkpoints (download separately — see README) ───
+checkpoints/
+sam-3d-body-dinov3/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
 
-/output
+# ── TensorRT / ONNX engines (build locally — see README) ─────────────
+*.engine
+*.onnx
+*.trt
+*.plan
+backbone_trt/
+
+# ── Outputs (videos, keypoints, renders) ─────────────────────────────
+output/
+output_*/
+*.mp4
+*.avi
+*.mov
+*.npy
+*.npz
+
+# ── Experiment artifacts ─────────────────────────────────────────────
+mhr2smpl/experiments/
+mhr2smpl/output_visualization/
+wandb/
+*.log
+
+# ── OS / editor ──────────────────────────────────────────────────────
+.DS_Store
+*.swp
+.vscode/
+.idea/
