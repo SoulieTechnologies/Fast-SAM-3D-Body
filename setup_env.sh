@@ -40,8 +40,10 @@ echo "=== Installing MoGe ==="
 pip install git+https://github.com/microsoft/MoGe.git
 
 # Step 8: Install TensorRT + ONNX (optional, for .engine model conversion)
+# Pinned <11: TRT 11 removed BuilderFlag.FP16 / EXPLICIT_BATCH that the converters
+# and the runtime loader were written against.
 echo "=== Installing TensorRT & ONNX ==="
-pip install tensorrt-cu12 tensorrt-cu12-bindings tensorrt-cu12-libs onnx onnxruntime-gpu nvtx
+pip install "tensorrt-cu12<11" onnx onnxruntime-gpu nvtx
 
 
 pip install smplx numpy scipy opencv-python tqdm pyzmq pyrealsense2
