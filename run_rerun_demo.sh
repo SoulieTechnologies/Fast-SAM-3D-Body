@@ -18,6 +18,9 @@ COMFI_DIR="${COMFI_DIR:-$HOME/code/comfi-examples_new}"
 SOURCE="${SOURCE:-0}"                            # webcam index or video path
 GPU="${GPU:-0}"
 FX="${FX:-0}"                                    # camera focal (0 = MoGe2 auto)
+REPO_DIR_EARLY="$(cd "$(dirname "$0")" && pwd)"
+CKPT_DIR="${CKPT_DIR:-$REPO_DIR_EARLY/checkpoints/sam-3d-body-dinov3}"
+USE_TRT="${USE_TRT:-1}"                          # 0 = no TensorRT engine (slow, first test)
 EMIT_PORT="${EMIT_PORT:-8090}"
 RERUN_GRPC="${RERUN_GRPC:-9876}"
 RERUN_WEB="${RERUN_WEB:-9090}"
@@ -65,10 +68,13 @@ echo "    log: $LOG_DIR/ik.log"
 echo "[A] Starting SAM3D extractor (env: $SAM3D_ENV)..."
 conda activate "$SAM3D_ENV"
 cd "$REPO_DIR"
+export USE_TRT_BACKBONE="$USE_TRT"
+export TRT_BACKBONE_PATH="${TRT_BACKBONE_PATH:-$CKPT_DIR/backbone_trt/backbone_dinov3_fp16.engine}"
 FX_FLAG=""
 [ "$FX" != "0" ] && FX_FLAG="--fx $FX"
 python rerun_demo.py \
     --source "$SOURCE" --gpu "$GPU" $FX_FLAG \
+    --checkpoint_dir "$CKPT_DIR" \
     --emit-port "$EMIT_PORT" \
     --rerun-mode "$RERUN_MODE" \
     --rerun-grpc-port "$RERUN_GRPC" --rerun-web-port "$RERUN_WEB" \
