@@ -334,7 +334,9 @@ def run(args, estimator, cam_int, viz, rec):
                   + ("" if (w, h) == (args.cap_width, args.cap_height)
                      else f"  (requested {args.cap_width}x{args.cap_height} — camera negotiated down)"))
 
-    kw = {"inference_type": args.inference_type}
+    # The SAM estimator only knows body/full — hybrid runs a "body" SAM pass and
+    # adds the dedicated hand decoder itself; bodyhand never calls the estimator.
+    kw = {"inference_type": "full" if args.inference_type == "full" else "body"}
     if cam_int is not None:
         kw["cam_int"] = cam_int
     auto_est = cam_int is None and getattr(estimator, "fov_estimator", None) is not None
