@@ -73,7 +73,7 @@ bash run_demo.sh
 |---|---|
 | [**README_HAND_PIPELINE.md**](README_HAND_PIPELINE.md) | Real-time body + fine **hand** tracking (~14.6 FPS): YOLO body skeleton + dedicated SAM hand decoder |
 | [**README_REALTIME.md**](README_REALTIME.md) | Real-time **body** extraction (~15 FPS) and every optimization used to get there |
-| [**RUNBOOK_DEMO.md**](RUNBOOK_DEMO.md) | Live streaming demo: server → laptop browser (recorded video or live camera) |
+| [**RUNBOOK_DEMO.md**](RUNBOOK_DEMO.md) | Live demos: **Rerun UI** (camera + skeleton overlay + 3D skeleton + ACADOS retargeting via `run_rerun_demo.sh`) and MJPEG browser streaming |
 
 ### TensorRT Acceleration (Optional)
 

@@ -1,3 +1,34 @@
+# ═══ RERUN DEMO — camera + skeleton + ACADOS retargeting (new) ═══
+
+One command records the camera, shows a **Rerun UI** (video with skeleton overlay +
+3D skeleton alone + latency plots + retargeted skeleton) and runs the **ACADOS IK**
+retargeting (meshcat on localhost:7000 for the full URDF human).
+
+One-time setup on the machine:
+```bash
+conda activate <sam3d-env>  && pip install "rerun-sdk>=0.28"
+conda activate <acados-env> && pip install "rerun-sdk>=0.28"
+cp run_ik_live_rerun.py <comfi-examples_new>/scripts/   # ships in this repo
+```
+
+Run everything (both processes, Ctrl+C stops both):
+```bash
+cd <this-repo>
+SAM3D_ENV=<sam3d-env> ACADOS_ENV=<acados-env> COMFI_DIR=~/code/comfi-examples_new \
+SOURCE=0 GPU=0 FX=900 bash run_rerun_demo.sh
+```
+Then open (add `ssh -L <port>:localhost:<port>` for each if remote):
+- **Rerun UI**: http://localhost:9090
+- **meshcat** (URDF human): http://localhost:7000/static/
+
+Recording lands in `output_rerun_demo/<timestamp>/`: `raw.mp4`, `overlay.mp4`,
+`joints_2d.npy`, `joints_3d.npy`, `joints_3d_world.npy`, `timestamps.npy`.
+IK process log: `output_rerun_demo/ik.log`.
+
+On a machine with a screen, use `RERUN_MODE=native` for the local Rerun window.
+Each process also runs standalone — see the docstrings of `rerun_demo.py` and
+`scripts/run_ik_live_rerun.py`.
+
 # ═══ LIVE SAM3D SKELETON DEMO (primary) ═══
 
 Real-time 3D skeleton (body + hands) streamed to your laptop browser. Two ways:
