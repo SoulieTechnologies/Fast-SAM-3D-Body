@@ -49,8 +49,14 @@ parent_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, parent_dir)
 
 
-# Default paths
-CHECKPOINT_DIR = os.path.join(os.path.dirname(parent_dir), "checkpoints", "sam-3d-body-dinov3")
+# Default paths — env var CHECKPOINT_DIR wins, then the repo-local checkpoints/,
+# then the legacy layout with checkpoints/ as a sibling of the repo.
+_candidates = [
+    os.environ.get("CHECKPOINT_DIR", ""),
+    os.path.join(parent_dir, "checkpoints", "sam-3d-body-dinov3"),
+    os.path.join(os.path.dirname(parent_dir), "checkpoints", "sam-3d-body-dinov3"),
+]
+CHECKPOINT_DIR = next((c for c in _candidates if c and os.path.isdir(c)), _candidates[1])
 TRT_OUTPUT_DIR = os.path.join(CHECKPOINT_DIR, "backbone_trt")
 ONNX_PATH = os.path.join(TRT_OUTPUT_DIR, "backbone_dinov3.onnx")
 TRT_PATH_BF16 = os.path.join(TRT_OUTPUT_DIR, "backbone_dinov3_bf16.engine")
