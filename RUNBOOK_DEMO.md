@@ -6,9 +6,10 @@ retargeting (meshcat on localhost:7000 for the full URDF human).
 
 One-time setup on the machine:
 ```bash
+git clone https://github.com/SoulieTechnologies/comfi-examples-hands.git
+# (contains scripts/run_ik_live_rerun.py; install/build acados inside it — not shipped)
 conda activate <sam3d-env>  && pip install "rerun-sdk>=0.28"
 conda activate <acados-env> && pip install "rerun-sdk>=0.28"
-cp run_ik_live_rerun.py <comfi-examples_new>/scripts/   # ships in this repo
 ```
 
 Run everything (both processes, Ctrl+C stops both):
