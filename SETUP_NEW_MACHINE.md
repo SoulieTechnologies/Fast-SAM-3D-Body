@@ -101,7 +101,8 @@ cd ..
 # Tera renderer (codegen templating) — install it NOW. The first solver build
 # happens inside the BACKGROUNDED IK process (no tty), so the interactive
 # auto-download prompt of older acados_template versions would hang there:
-wget https://github.com/acados/tera_renderer/releases/download/v0.2.0/t_renderer-v0.2.0-linux \
+mkdir -p acados/bin
+wget https://github.com/acados/tera_renderer/releases/download/v0.2.0/t_renderer-v0.2.0-linux-amd64 \
   -O acados/bin/t_renderer && chmod +x acados/bin/t_renderer
 ```
 
