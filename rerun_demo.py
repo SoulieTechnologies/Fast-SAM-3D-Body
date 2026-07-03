@@ -56,6 +56,18 @@ import torch
 from notebook.utils import setup_sam_3d_body
 from visualize_skeleton_video import ALL_BONES, draw_option_b, draw_skeleton
 
+# The ~15fps YOLO-body + dedicated-hand-decoder pipeline (--inference-type bodyhand)
+# reuses the building blocks of body_hand_decoder_extractor.py.
+from body_hand_decoder_extractor import (
+    HAND_SRC, L_ELBOW, L_WRIST, R_ELBOW, R_WRIST,
+    _draw_body, _draw_hand, _hand_box, _largest,
+)
+from sam_3d_body.models.meta_arch.sam3d_body import _prepare_hand_batches_gpu
+
+# COCO-17 (YOLO-pose) index → Goliath-70 index (wrists live in the hand blocks).
+_COCO2GOLIATH = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8,
+                 9: 62, 10: 41, 11: 9, 12: 10, 13: 11, 14: 12, 15: 13, 16: 14}
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # RERUN VISUALIZER
@@ -136,7 +148,7 @@ class RerunViz:
                 image_plane_distance=0.6,
             ))
 
-        if kp3d is None or not np.isfinite(kp3d[:21]).any():
+        if kp3d is None or not np.isfinite(kp3d).any():
             rr.log("world/skeleton", rr.Clear(recursive=True))
             return
         valid = np.isfinite(kp3d).all(axis=1)
@@ -196,6 +208,71 @@ class Recorder:
             print(f"  Recording saved to {self.dir}/  "
                   f"({len(self.kp2d)} frames @ nominal {self.fps:.1f} fps — "
                   f"see timestamps.npy for exact timing)")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# BODYHAND PIPELINE (YOLO body + dedicated SAM hand decoder, ~15fps design)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _bodyhand_step(est, frame_bgr, cam_int, args):
+    """One frame of the YOLO-body + hand-decoder pipeline.
+
+    Returns (kp70_2d, body17_2d, kp_r21, kp_l21, hands3d70) or None if nobody
+    detected. hands3d70 is (70,3) with only the hand blocks filled (each hand
+    re-anchored near the origin for the 3D panel — there is NO 3D body here).
+    """
+    model = est.model
+    with torch.no_grad(), _quiet():
+        dr = est.detector.run_human_detection(
+            frame_bgr, det_cat_id=0, bbox_thr=0.5, nms_thr=0.3,
+            default_to_full_image=False)
+    boxes = dr["boxes"] if isinstance(dr, dict) else dr
+    kps = dr.get("keypoints") if isinstance(dr, dict) else None
+    sel = _largest(boxes)
+    if sel is None or kps is None or len(kps) <= sel:
+        return None
+    k = kps[sel]                                   # (17,3) x,y,conf
+    body = k[:, :2].copy()
+    body[k[:, 2] < 0.3] = np.nan
+
+    kp_r = kp_l = None
+    h3d = np.full((70, 3), np.nan, np.float32)
+    rbox = _hand_box(k[R_WRIST, :2], k[R_ELBOW, :2], args.box_offset, args.box_size)
+    lbox = _hand_box(k[L_WRIST, :2], k[L_ELBOW, :2], args.box_offset, args.box_size)
+    if rbox is not None and lbox is not None and cam_int is not None:
+        out_hw = ((args.hand_res, args.hand_res) if args.hand_res > 0
+                  else (model.cfg.MODEL.IMAGE_SIZE[1], model.cfg.MODEL.IMAGE_SIZE[0]))
+        with torch.no_grad(), _quiet():
+            bl, br, _ = _prepare_hand_batches_gpu(
+                cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB), lbox[None], rbox[None],
+                cam_int, output_size=out_hw, padding=0.9, device="cuda")
+            bh = model._merge_hand_batches(bl, br)
+            model._initialize_batch(bh)
+            merged = model.forward_step(bh, decoder_type="hand")
+            lh, rh = model._split_hand_outputs(merged, batch_size=1)
+        kp_r = rh["mhr_hand"]["pred_keypoints_2d"][0].detach().cpu().numpy()[HAND_SRC]
+        kp_l = lh["mhr_hand"]["pred_keypoints_2d"][0].detach().cpu().numpy()[HAND_SRC].copy()
+        kp_l[:, 0] = frame_bgr.shape[1] - kp_l[:, 0] - 1     # un-flip left hand
+        # 3D fingers for the 3D panel (each hand anchored at its wrist near origin)
+        for out, sl, mirror, anchor in ((rh, slice(21, 42), False, (+0.15, 0, 0.5)),
+                                        (lh, slice(42, 63), True, (-0.15, 0, 0.5))):
+            k3 = out["mhr_hand"].get("pred_keypoints_3d")
+            if k3 is None:
+                continue
+            k3 = k3[0].detach().cpu().numpy()[HAND_SRC].copy()
+            if mirror:
+                k3[:, 0] *= -1                               # un-flip left hand
+            k3 = k3 - k3[20] + np.asarray(anchor, np.float32)  # wrist → anchor
+            h3d[sl] = k3
+
+    kp70 = np.full((70, 2), np.nan, np.float32)
+    for c, g in _COCO2GOLIATH.items():
+        kp70[g] = body[c]
+    if kp_r is not None:
+        kp70[21:42] = kp_r
+    if kp_l is not None:
+        kp70[42:63] = kp_l
+    return kp70, body, kp_r, kp_l, h3d
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -270,41 +347,59 @@ def run(args, estimator, cam_int, viz, rec):
 
         # ── inference ────────────────────────────────────────────────────
         t0 = time.perf_counter()
-        with torch.no_grad(), _quiet():
-            out = estimator.process_one_image(
-                cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), **kw)
-        infer_ms = (time.perf_counter() - t0) * 1e3
-
-        sel = _select_person(out, cen, img_diag) if out else None
         kp = yolo_kp = kp3d = world = None
-        if sel is not None:
-            kp, yolo_kp, kp3d, cen = sel
-            # gravity-aligned world 3D → IK process (Proc B) + recording
-            if M is None and np.isfinite(kp3d[[0, 5, 6, 9, 10, 13, 14]]).all():
-                align_buf.append(kp3d)
-                if len(align_buf) >= args.warmup:
-                    M = _canonical_M(align_buf)
-                    print(f"  gravity alignment locked after {len(align_buf)} frames",
-                          flush=True)
-            if M is not None:
-                world = (M @ kp3d.T).T.astype(np.float32)
-                if args.emit_port > 0:
-                    _EMIT["buf"] = world.tobytes()
-                    _EMIT["n"] = frame_idx        # frame index → synced Rerun timelines
+        body17 = kp_r = kp_l = None
+        if args.inference_type == "bodyhand":
+            # YOLO body + dedicated hand decoder (no SAM body pass, no 3D body)
+            res = _bodyhand_step(estimator, frame, kw.get("cam_int"), args)
+            infer_ms = (time.perf_counter() - t0) * 1e3
+            if res is not None:
+                kp, body17, kp_r, kp_l, kp3d = res    # kp3d: hands-only (70,3)
+        else:
+            with torch.no_grad(), _quiet():
+                out = estimator.process_one_image(
+                    cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), **kw)
+            infer_ms = (time.perf_counter() - t0) * 1e3
+            sel = _select_person(out, cen, img_diag) if out else None
+            if sel is not None:
+                kp, yolo_kp, kp3d, cen = sel
+                # gravity-aligned world 3D → IK process (Proc B) + recording
+                if M is None and np.isfinite(kp3d[[0, 5, 6, 9, 10, 13, 14]]).all():
+                    align_buf.append(kp3d)
+                    if len(align_buf) >= args.warmup:
+                        M = _canonical_M(align_buf)
+                        print(f"  gravity alignment locked after {len(align_buf)} frames",
+                              flush=True)
+                if M is not None:
+                    world = (M @ kp3d.T).T.astype(np.float32)
+                    if args.emit_port > 0:
+                        _EMIT["buf"] = world.tobytes()
+                        _EMIT["n"] = frame_idx    # frame index → synced Rerun timelines
 
         # ── overlay ──────────────────────────────────────────────────────
-        if kp is not None:
+        if args.inference_type == "bodyhand":
+            if body17 is not None:
+                frame = _draw_body(frame, body17)
+                if kp_r is not None:
+                    frame = _draw_hand(frame, kp_r)
+                if kp_l is not None:
+                    frame = _draw_hand(frame, kp_l)
+            hud = "YOLO body + hand decoder"
+        elif kp is not None:
             if yolo_kp is not None:
                 frame = draw_option_b(frame, yolo_kp, kp,
                                       frame.shape[1], frame.shape[0], args.hand_scale)
             else:
                 valid = ~np.isnan(kp).any(axis=1)
                 frame = draw_skeleton(frame, kp, valid, frame.shape[1], frame.shape[0])
+            hud = "SAM3D 3D pose"
+        else:
+            hud = "SAM3D 3D pose"
         e2e_ms = (time.perf_counter() - t0) * 1e3
         ema = 1e3 / e2e_ms if ema is None else 0.85 * ema + 0.15 * (1e3 / e2e_ms)
-        cv2.putText(frame, f"SAM3D 3D pose  {ema:4.1f} FPS", (14, 40),
+        cv2.putText(frame, f"{hud}  {ema:4.1f} FPS", (14, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 4, cv2.LINE_AA)
-        cv2.putText(frame, f"SAM3D 3D pose  {ema:4.1f} FPS", (14, 40),
+        cv2.putText(frame, f"{hud}  {ema:4.1f} FPS", (14, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
 
         # ── log + record ─────────────────────────────────────────────────
@@ -330,10 +425,19 @@ def main():
                    help="requested webcam capture width (default 1280)")
     p.add_argument("--cap-height", type=int, default=720,
                    help="requested webcam capture height (default 720)")
-    p.add_argument("--inference-type", choices=["body", "full"], default="body",
+    p.add_argument("--inference-type", choices=["body", "full", "bodyhand"],
+                   default="body",
                    help="body: fast, fingers regressed by the body head (coarse); "
-                        "full: dedicated SAM hand decoder + refinement — faithful "
-                        "fingers, slower (worth it on a 4090)")
+                        "full: whole SAM pipeline incl. refinement (slow); "
+                        "bodyhand: YOLO body + dedicated SAM hand decoder — faithful "
+                        "fingers at ~15fps, but NO 3D body (IK/retarget disabled)")
+    p.add_argument("--box-offset", type=float, default=0.35,
+                   help="[bodyhand] push hand-box centre along elbow→wrist by this × forearm")
+    p.add_argument("--box-size", type=float, default=1.0,
+                   help="[bodyhand] hand-box side = this × forearm length")
+    p.add_argument("--hand-res", type=int, default=0,
+                   help="[bodyhand] backbone input for hand crops (0=model default 512; "
+                        "256 needs the 256 engine + TRT_INPUT_SIZE=256)")
     p.add_argument("--gpu", type=int, default=0)
     p.add_argument("--checkpoint_dir",
                    default="/home/users/theo/code/checkpoints/sam-3d-body-dinov3")
@@ -365,6 +469,11 @@ def main():
                    help="recording dir (default ./output_rerun_demo/<timestamp>)")
     p.add_argument("--no-record", action="store_true")
     args = p.parse_args()
+
+    if args.inference_type == "bodyhand" and args.emit_port > 0:
+        print("  NOTE: bodyhand mode has no 3D body → IK/retarget feed disabled "
+              "(use --inference-type body for the ACADOS pipeline)")
+        args.emit_port = 0
 
     out_dir = args.output_dir or os.path.join(
         "output_rerun_demo", time.strftime("%Y%m%d_%H%M%S"))

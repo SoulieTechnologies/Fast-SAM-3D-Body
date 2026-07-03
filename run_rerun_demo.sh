@@ -49,6 +49,10 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 # ── Proc B: ACADOS IK (starts first; retries until the extractor is up) ──────
+# bodyhand mode has no 3D body → nothing to retarget, skip the IK process.
+if [ "$INFER" = "bodyhand" ]; then
+    echo "[B] Skipped (INFER=bodyhand has no 3D body for the IK)"
+else
 echo "[B] Starting ACADOS IK retargeting (env: $ACADOS_ENV)..."
 (
     conda activate "$ACADOS_ENV"
@@ -64,6 +68,7 @@ echo "[B] Starting ACADOS IK retargeting (env: $ACADOS_ENV)..."
 ) > "$LOG_DIR/ik.log" 2>&1 &
 PIDS+=($!)
 echo "    log: $LOG_DIR/ik.log"
+fi
 
 # ── Proc A: SAM3D extractor + Rerun UI + recording (foreground) ──────────────
 echo "[A] Starting SAM3D extractor (env: $SAM3D_ENV)..."
