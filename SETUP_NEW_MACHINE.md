@@ -87,8 +87,13 @@ conda create -n acados python=3.11 -y
 conda activate acados
 cd ~/code/comfi-examples-hands
 pip install --upgrade pip
-pip install -e .                            # pinocchio(pin)+casadi, meshcat, onnxruntime...
+pip install -e .                            # meshcat, onnxruntime, quadprog...
 pip install "rerun-sdk>=0.28"
+# The pip "pin" wheel ships WITHOUT casadi support (no pinocchio.casadi) —
+# replace it with the conda-forge build, which has it:
+pip uninstall -y pin libpinocchio casadi
+conda install -c conda-forge pinocchio casadi -y
+python -c "import pinocchio.casadi"         # must not error
 
 # Build acados INSIDE the repo (scripts expect ACADOS_SOURCE_DIR=$PWD/acados):
 git clone https://github.com/acados/acados.git --recursive
@@ -157,7 +162,9 @@ First full run: acados generates + compiles the solver (~1-2 min), IPOPT warm-st
 | HF 401/403 on checkpoint download | Accept the license on the model page + `huggingface-cli login` |
 | acados: `t_renderer not found` | Manual install (end of step 6) |
 | acados solver compile takes minutes | `export ACADOS_EXT_FUN_COMPILE_FLAGS=-O1` |
-| `pinocchio.casadi` import error | `pip install "pin>=3.7.0"` (NOT conda pinocchio without casadi) |
+| `pinocchio.casadi` import error | pip `pin` has no casadi support → `pip uninstall -y pin libpinocchio casadi && conda install -c conda-forge pinocchio casadi` |
+| gcc error at first solver build | Check the flag is the LETTER O: `ACADOS_EXT_FUN_COMPILE_FLAGS=-O1` (not `-01`) |
+| Assembler segfault during `make` | Retry with `make install -j4`; if persistent, `conda deactivate` for the build |
 | Webcam not found | `ls /dev/video*`; try `SOURCE=1`; check user is in the `video` group |
 | Skeleton NaN / diverges | Wrong `FX` — measure the camera focal or set `FX=0` (MoGe2) |
 | Rerun page blank | rerun-sdk version <0.28 → `pip install -U rerun-sdk` in BOTH envs |
