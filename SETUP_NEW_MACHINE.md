@@ -44,9 +44,12 @@ conda activate fast_sam_3d_body
 cd ~/code/Fast-SAM-3D-Body
 
 # 3a. SAM-3D-Body (gated on HuggingFace):
-#     1) visit https://huggingface.co/facebook/sam-3d-body and accept the license
-#     2) login, then the checkpoint auto-downloads on first run:
+#     1) visit https://huggingface.co/facebook/sam-3d-body-dinov3 and accept the license
+#     2) login and download EXPLICITLY (no auto-download when --checkpoint_dir is a
+#        local path — setup_sam_3d_body only pulls from HF when given no local path):
 huggingface-cli login                       # paste a HF token (read)
+huggingface-cli download facebook/sam-3d-body-dinov3 --local-dir checkpoints/sam-3d-body-dinov3
+ls checkpoints/sam-3d-body-dinov3/model.ckpt checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt  # must exist
 
 # 3b. YOLO11-pose weights:
 mkdir -p checkpoints/yolo
