@@ -211,8 +211,18 @@ def run(args, estimator, cam_int, viz, rec):
         cap = cv2.VideoCapture(int(args.source) if is_cam else args.source)
         if not cap.isOpened():
             raise ValueError(f"Cannot open source: {args.source}")
+        if is_cam:
+            # Explicitly request the capture resolution — OpenCV often defaults a
+            # webcam to 640x480, which shrinks the hands and degrades everything.
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.cap_width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.cap_height)
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            print(f"  camera capture: {w}x{h}"
+                  + ("" if (w, h) == (args.cap_width, args.cap_height)
+                     else f"  (requested {args.cap_width}x{args.cap_height} — camera negotiated down)"))
 
-    kw = {"inference_type": "body"}
+    kw = {"inference_type": args.inference_type}
     if cam_int is not None:
         kw["cam_int"] = cam_int
     auto_est = cam_int is None and getattr(estimator, "fov_estimator", None) is not None
@@ -316,6 +326,14 @@ def main():
         description="Live SAM3D → Rerun UI + recording + ACADOS IK feed")
     p.add_argument("--source", default="0", help="webcam index or video path")
     p.add_argument("--loop", action="store_true", help="loop a video source forever")
+    p.add_argument("--cap-width", type=int, default=1280,
+                   help="requested webcam capture width (default 1280)")
+    p.add_argument("--cap-height", type=int, default=720,
+                   help="requested webcam capture height (default 720)")
+    p.add_argument("--inference-type", choices=["body", "full"], default="body",
+                   help="body: fast, fingers regressed by the body head (coarse); "
+                        "full: dedicated SAM hand decoder + refinement — faithful "
+                        "fingers, slower (worth it on a 4090)")
     p.add_argument("--gpu", type=int, default=0)
     p.add_argument("--checkpoint_dir",
                    default="/home/users/theo/code/checkpoints/sam-3d-body-dinov3")

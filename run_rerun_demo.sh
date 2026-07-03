@@ -21,6 +21,7 @@ FX="${FX:-0}"                                    # camera focal (0 = MoGe2 auto)
 REPO_DIR_EARLY="$(cd "$(dirname "$0")" && pwd)"
 CKPT_DIR="${CKPT_DIR:-$REPO_DIR_EARLY/checkpoints/sam-3d-body-dinov3}"
 USE_TRT="${USE_TRT:-1}"                          # 0 = no TensorRT engine (slow, first test)
+INFER="${INFER:-body}"                           # body: fast/coarse fingers | full: SAM hand decoder (faithful fingers, slower)
 EMIT_PORT="${EMIT_PORT:-8090}"
 RERUN_GRPC="${RERUN_GRPC:-9876}"
 RERUN_WEB="${RERUN_WEB:-9090}"
@@ -74,6 +75,7 @@ FX_FLAG=""
 [ "$FX" != "0" ] && FX_FLAG="--fx $FX"
 python rerun_demo.py \
     --source "$SOURCE" --gpu "$GPU" $FX_FLAG \
+    --inference-type "$INFER" \
     --checkpoint_dir "$CKPT_DIR" \
     --emit-port "$EMIT_PORT" \
     --rerun-mode "$RERUN_MODE" \
