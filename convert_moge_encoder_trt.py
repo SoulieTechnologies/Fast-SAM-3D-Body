@@ -161,7 +161,11 @@ def convert_trt():
     # Create builder
     logger = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(logger)
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+    try:
+        flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    except AttributeError:      # TRT >= 11: explicit batch is the only mode (flag removed)
+        flags = 0
+    network = builder.create_network(flags)
     parser = trt.OnnxParser(network, logger)
 
     # Parse ONNX
