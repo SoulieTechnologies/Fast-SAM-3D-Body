@@ -95,10 +95,11 @@ make install -j$(nproc)
 cd .. && pip install -e interfaces/acados_template
 cd ..
 
-# Tera renderer (codegen templating): acados offers to auto-download it on the
-# first solver build — answer 'y'. If that fails (no tty), install manually:
-#   wget https://github.com/acados/tera_renderer/releases/download/v0.2.0/t_renderer-v0.2.0-linux \
-#     -O acados/bin/t_renderer && chmod +x acados/bin/t_renderer
+# Tera renderer (codegen templating) — install it NOW. The first solver build
+# happens inside the BACKGROUNDED IK process (no tty), so the interactive
+# auto-download prompt of older acados_template versions would hang there:
+wget https://github.com/acados/tera_renderer/releases/download/v0.2.0/t_renderer-v0.2.0-linux \
+  -O acados/bin/t_renderer && chmod +x acados/bin/t_renderer
 ```
 
 ## 7. Smoke test — IK process alone
@@ -127,7 +128,12 @@ bash run_rerun_demo.sh
 - `USE_TRT=0` to run before the engines are built (slow).
 - IK log: `output_rerun_demo/ik.log`. Recording: `output_rerun_demo/<timestamp>/`.
 
-Open (add `ssh -L <port>:localhost:<port> <machine>` for each if remote):
+If remote, tunnel ALL THREE ports (the Rerun web page connects back to the gRPC
+port 9876 from your browser — 9090 alone shows an empty viewer):
+
+```bash
+ssh -L 9090:localhost:9090 -L 9876:localhost:9876 -L 7000:localhost:7000 <machine>
+```
 
 | URL | What |
 |---|---|
