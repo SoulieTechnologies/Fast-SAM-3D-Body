@@ -101,9 +101,11 @@ class RerunViz:
                   f"→ http://localhost:{web_port}")
             print(f"  Rerun gRPC (for the IK process): {self.grpc_url}")
         elif mode == "native":
-            rr.spawn()
-            # also serve gRPC so the IK process can join the same viewer
-            self.grpc_url = rr.serve_grpc(grpc_port=grpc_port)
+            # The spawned viewer itself listens for gRPC connections on this port —
+            # do NOT call serve_grpc() afterwards: it would swap the sink away from
+            # the viewer and orphan it (viewer shows nothing).
+            rr.spawn(port=grpc_port)
+            self.grpc_url = f"rerun+http://127.0.0.1:{grpc_port}/proxy"
         else:  # save
             path = os.path.join(output_dir, "session.rrd")
             rr.save(path)
