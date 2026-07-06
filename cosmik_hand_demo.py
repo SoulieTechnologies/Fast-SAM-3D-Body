@@ -299,12 +299,13 @@ class HandWorker(threading.Thread):
             k17 = res["kp2d"][self.view][:17].copy()
             k17[res["scores"][self.view][:17] < self.args.det_thr] = np.nan
             t0 = time.perf_counter()
-            kp_r, kp_l, k3r, k3l = _hand_decoder_step(
+            kp_r, kp_l, k3r, k3l, rbox, lbox = _hand_decoder_step(
                 self.model, frame, k17, self.cam_int, self.args)
             ms = (time.perf_counter() - t0) * 1e3
             with self._lock:
                 self.result = {"kp_r": kp_r, "kp_l": kp_l,
-                               "k3r": k3r, "k3l": k3l, "ms": ms}
+                               "k3r": k3r, "k3l": k3l, "ms": ms,
+                               "rbox": rbox, "lbox": lbox}
                 self.n += 1
 
     def latest(self):
@@ -535,6 +536,11 @@ def main():
                         img = _draw_hand(img, hres["kp_r"])
                     if hres["kp_l"] is not None:
                         img = _draw_hand(img, hres["kp_l"])
+                    for box in (hres.get("rbox"), hres.get("lbox")):
+                        if box is not None and np.isfinite(box).all():
+                            cv2.rectangle(img, tuple(box[:2].astype(int)),
+                                          tuple(box[2:].astype(int)),
+                                          (255, 170, 80), 2)
                 overlays.append(img)
 
             dt = (t_wall - t_prev) if t_prev else None
