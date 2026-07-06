@@ -447,6 +447,10 @@ def main():
     p.add_argument("--det-thr", type=float, default=0.3)
     p.add_argument("--box-offset", type=float, default=0.35)
     p.add_argument("--box-size", type=float, default=1.0)
+    p.add_argument("--box-scale-mode", choices=["stable", "forearm"], default="stable",
+                   help="stable: shoulder-width floor on the hand box (no foreshortening "
+                        "shrink); forearm: original behaviour")
+    p.add_argument("--box-shoulder-frac", type=float, default=0.5)
     p.add_argument("--hand-res", type=int, default=0)
     p.add_argument("--rerun-mode", choices=["web", "native", "save"], default="web")
     p.add_argument("--rerun-grpc-port", type=int, default=9876)

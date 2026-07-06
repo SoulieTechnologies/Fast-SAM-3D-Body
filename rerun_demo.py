@@ -230,6 +230,34 @@ class Recorder:
 # BODYHAND PIPELINE (YOLO body + dedicated SAM hand decoder, ~15fps design)
 # ═══════════════════════════════════════════════════════════════════════════
 
+_L_SHO, _R_SHO = 5, 6      # COCO shoulder indices
+
+
+def _hand_box_v2(k17, wrist_i, elbow_i, args):
+    """Elbow→wrist hand box, optionally with a shoulder-width floor on its size.
+
+    The original box side is proportional to the PROJECTED forearm length, so it
+    collapses when the forearm points at the camera (foreshortening) even though
+    the hand's apparent size didn't change. In "stable" mode (default) the side
+    is floored at box_shoulder_frac × projected shoulder width — which scales
+    with distance but not with forearm orientation. "forearm" mode = original
+    behaviour, unchanged.
+    """
+    box = _hand_box(k17[wrist_i], k17[elbow_i], args.box_offset, args.box_size)
+    if box is None or getattr(args, "box_scale_mode", "stable") == "forearm":
+        return box
+    sho = np.array([k17[_L_SHO], k17[_R_SHO]])
+    if not np.isfinite(sho).all():
+        return box
+    min_side = getattr(args, "box_shoulder_frac", 0.5) * np.linalg.norm(sho[0] - sho[1])
+    side = box[2] - box[0]
+    if side >= min_side:
+        return box
+    cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    return np.array([cx - min_side / 2, cy - min_side / 2,
+                     cx + min_side / 2, cy + min_side / 2], np.float32)
+
+
 def _hand_decoder_step(model, frame_bgr, k17_xy, cam_int, args):
     """Run the dedicated SAM hand decoder on elbow→wrist crops.
 
@@ -238,8 +266,8 @@ def _hand_decoder_step(model, frame_bgr, k17_xy, cam_int, args):
     left hand un-mirrored, NOT anchored; rbox/lbox are the (4,) xyxy crop
     boxes; any element None if unavailable.
     """
-    rbox = _hand_box(k17_xy[R_WRIST], k17_xy[R_ELBOW], args.box_offset, args.box_size)
-    lbox = _hand_box(k17_xy[L_WRIST], k17_xy[L_ELBOW], args.box_offset, args.box_size)
+    rbox = _hand_box_v2(k17_xy, R_WRIST, R_ELBOW, args)
+    lbox = _hand_box_v2(k17_xy, L_WRIST, L_ELBOW, args)
     if rbox is None or lbox is None or cam_int is None:
         return None, None, None, None, rbox, lbox
     out_hw = ((args.hand_res, args.hand_res) if args.hand_res > 0
@@ -527,6 +555,12 @@ def main():
                    help="[bodyhand] push hand-box centre along elbow→wrist by this × forearm")
     p.add_argument("--box-size", type=float, default=1.0,
                    help="[bodyhand] hand-box side = this × forearm length")
+    p.add_argument("--box-scale-mode", choices=["stable", "forearm"], default="stable",
+                   help="stable: floor the hand-box size with the shoulder width "
+                        "(no shrink when the forearm points at the camera); "
+                        "forearm: original behaviour")
+    p.add_argument("--box-shoulder-frac", type=float, default=0.5,
+                   help="[stable] minimum hand-box side = this × projected shoulder width")
     p.add_argument("--hand-res", type=int, default=0,
                    help="[bodyhand] backbone input for hand crops (0=model default 512; "
                         "256 needs the 256 engine + TRT_INPUT_SIZE=256)")
