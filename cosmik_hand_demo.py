@@ -28,8 +28,11 @@ Calibration (--calib) accepts:
   - multi npz   : keys K0..K{n},D0..,R0..,T0..  (R0=I, T0=0 for the reference)
 
 Run (sam3d env; pip install rtmlib):
+  # multi-camera (metric 3D):
   python cosmik_hand_demo.py --cams 0,1 --calib stereo_params.npz \
       --checkpoint_dir ./checkpoints/sam-3d-body-dinov3 --rerun-mode native
+  # MONO mode (no calib yet): body26 2D + hand-decoder fingers, no metric body 3D
+  python cosmik_hand_demo.py --cams 0 --fx 540 --rerun-mode native
 """
 
 import os
@@ -252,10 +255,14 @@ class BodyWorker(threading.Thread):
                 if k is not None:
                     kp2d[i] = k[:26]
                     sc[i] = s[:26]
-            kp2d_masked = kp2d.copy()
-            kp2d_masked[sc < self.det_thr] = np.nan
-            kp3d = triangulate_multiview(kp2d_masked, sc, Ks, Ds, Rs, Ts,
-                                         thr=self.det_thr)
+            if ncam >= 2:
+                kp2d_masked = kp2d.copy()
+                kp2d_masked[sc < self.det_thr] = np.nan
+                kp3d = triangulate_multiview(kp2d_masked, sc, Ks, Ds, Rs, Ts,
+                                             thr=self.det_thr)
+            else:
+                # MONO mode: no metric body 3D possible with a single view
+                kp3d = np.full((26, 3), np.nan, np.float32)
             ms = (time.perf_counter() - t0) * 1e3
             with self._lock:
                 self.result = {"kp2d": kp2d, "scores": sc, "kp3d": kp3d,
@@ -321,12 +328,16 @@ def fuse_goliath70(kp3d26, hands, R_world_handcam):
         g[gi] = kp3d26[c]
     if hands is None:
         return g
-    for dec, sl, wri26 in ((hands["k3r"], slice(21, 42), R_WRI26),
-                           (hands["k3l"], slice(42, 63), L_WRI26)):
-        if dec is None or not np.isfinite(kp3d26[wri26]).all():
+    for dec, sl, wri26, disp in ((hands["k3r"], slice(21, 42), R_WRI26, (+0.15, 0, 0.5)),
+                                 (hands["k3l"], slice(42, 63), L_WRI26, (-0.15, 0, 0.5))):
+        if dec is None:
             continue
         off = (dec - dec[_H_WRIST]) @ R_world_handcam.T
-        g[sl] = kp3d26[wri26] + off
+        if np.isfinite(kp3d26[wri26]).all():
+            g[sl] = kp3d26[wri26] + off              # metric wrist anchor
+        else:
+            # MONO mode: no metric wrist — anchor at a fixed display position
+            g[sl] = np.asarray(disp, np.float32) + off
     return g
 
 
@@ -418,8 +429,14 @@ def draw_body26(img, kp, sc, thr):
 
 def main():
     p = argparse.ArgumentParser(description="COSMIK body26 (multi-cam metric) + SAM hand decoder")
-    p.add_argument("--cams", default="0,1", help="comma-separated camera indices")
-    p.add_argument("--calib", required=True, help="calibration npz (see docstring)")
+    p.add_argument("--cams", default="0", help="comma-separated camera indices")
+    p.add_argument("--calib", default="", help="calibration npz (see docstring); "
+                   "required for >=2 cameras, optional in mono mode")
+    p.add_argument("--fx", type=float, default=540.0,
+                   help="[mono] focal length in px (default 540 ≈ 720p webcam)")
+    p.add_argument("--fy", type=float, default=0)
+    p.add_argument("--cx", type=float, default=0)
+    p.add_argument("--cy", type=float, default=0)
     p.add_argument("--hand-cam", type=int, default=0,
                    help="which view (position in --cams) runs the hand decoder")
     p.add_argument("--gpu", type=int, default=0)
@@ -441,9 +458,21 @@ def main():
 
     cam_idx = [int(x) for x in args.cams.split(",")]
     ncam = len(cam_idx)
-    Ks, Ds, Rs, Ts = load_calibration(args.calib, ncam)
-    base = np.linalg.norm(Ts[1]) if ncam > 1 else 0.0
-    print(f"  calib: {ncam} cameras, baseline cam0-cam1 ≈ {base * 100:.1f} cm")
+    if args.calib:
+        Ks, Ds, Rs, Ts = load_calibration(args.calib, ncam)
+        base = np.linalg.norm(Ts[1]) if ncam > 1 else 0.0
+        print(f"  calib: {ncam} cameras, baseline cam0-cam1 ≈ {base * 100:.1f} cm")
+    elif ncam == 1:
+        # MONO mode: intrinsics from --fx (used by the hand decoder only)
+        cx = args.cx if args.cx > 0 else args.cap_width / 2.0
+        cy = args.cy if args.cy > 0 else args.cap_height / 2.0
+        K = np.array([[args.fx, 0, cx], [0, args.fy or args.fx, cy], [0, 0, 1]],
+                     np.float64)
+        Ks, Ds, Rs, Ts = [K], [np.zeros(5)], [np.eye(3)], [np.zeros(3)]
+        print(f"  MONO MODE — body26 is 2D only (metric 3D needs >=2 calibrated "
+              f"cameras). Hands shown in 3D at a fixed anchor. fx={args.fx:.0f}")
+    else:
+        raise SystemExit("--calib is required with 2+ cameras")
 
     out_dir = args.output_dir or os.path.join(
         "output_cosmik_demo", time.strftime("%Y%m%d_%H%M%S"))
