@@ -44,14 +44,8 @@ for p0, p1 in zip(paths0, paths1):
     gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
 
     def get_charuco(gray):
-        corners, ids, _ = aruco_detector.detectMarkers(gray)
-        if ids is None or len(ids) < 4:
-            return None, None
-        retval, ch_corners, ch_ids = cv2.aruco.interpolateCornersCharuco(
-            corners, ids, gray, board
-        )
-        if retval < 6:
-            return None, None
+        ch_corners, ch_ids, _, _ = board_config.detect_charuco(
+            gray, board, dictionary, min_corners=6)
         return ch_corners, ch_ids
 
     ch0, ids0 = get_charuco(gray0)

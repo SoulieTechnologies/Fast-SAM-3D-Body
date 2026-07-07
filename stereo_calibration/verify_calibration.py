@@ -39,10 +39,8 @@ for p0, p1 in zip(paths0, paths1):
 
     # Per-image reprojection error
     def corners(gray):
-        c, ids, _ = aruco_detector.detectMarkers(gray)
-        if ids is None: return None, None
-        retval, cc, ci = cv2.aruco.interpolateCornersCharuco(c, ids, gray, board)
-        return (cc, ci) if retval >= 6 else (None, None)
+        cc, ci, _, _ = board_config.detect_charuco(gray, board, dictionary, min_corners=6)
+        return cc, ci
 
     cc0, ci0 = corners(cv2.cvtColor(img0, cv2.COLOR_BGR2GRAY))
     cc1, ci1 = corners(cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY))

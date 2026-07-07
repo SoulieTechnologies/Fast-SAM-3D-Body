@@ -35,27 +35,25 @@ for path in paths:
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     img_size = gray.shape[::-1]
 
-    corners, ids, _ = aruco_detector.detectMarkers(gray)
-    if ids is None or len(ids) < 4:
-        print(f"  skip (no markers): {path}")
-        continue
-
-    retval, ch_corners, ch_ids = cv2.aruco.interpolateCornersCharuco(
-        corners, ids, gray, board
-    )
-    if retval < 6:
-        print(f"  skip (only {retval} corners): {path}")
+    ch_corners, ch_ids, _, _ = board_config.detect_charuco(
+        gray, board, dictionary, min_corners=6)
+    if ch_corners is None:
+        print(f"  skip (board not found / too few corners): {path}")
         continue
 
     all_corners.append(ch_corners)
     all_ids.append(ch_ids)
-    print(f"  ok ({retval} corners): {path}")
+    print(f"  ok ({len(ch_corners)} corners): {path}")
 
 print(f"\nUsing {len(all_corners)} / {len(paths)} images for {args.cam}")
 assert len(all_corners) >= 10, "Need at least 10 valid frames for reliable calibration."
 
-rms, K, D, rvecs, tvecs = cv2.aruco.calibrateCameraCharuco(
-    all_corners, all_ids, board, img_size, None, None, flags=args.flags
+# calibrateCameraCharuco was removed in OpenCV >= 4.8 — build per-frame object
+# points from the board's chessboard corners and use plain calibrateCamera.
+chess = board.getChessboardCorners()            # (Ncorners, 3) float32, metres
+obj_all = [chess[ids.ravel()] for ids in all_ids]
+rms, K, D, rvecs, tvecs = cv2.calibrateCamera(
+    obj_all, all_corners, img_size, None, None, flags=args.flags
 )
 
 print(f"\nRMS reprojection error: {rms:.4f} px")

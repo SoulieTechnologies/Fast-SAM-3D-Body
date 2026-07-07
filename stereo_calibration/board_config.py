@@ -14,3 +14,33 @@ def make_board():
         (BOARD_COLS, BOARD_ROWS), SQUARE_SIZE, MARKER_SIZE, dictionary
     )
     return board, dictionary
+
+
+_CHARUCO_DETECTOR = None
+
+
+def detect_charuco(gray, board, dictionary, min_corners=6):
+    """ChArUco detection compatible with OpenCV >=4.8 (where the free functions
+    interpolateCornersCharuco / calibrateCameraCharuco were removed) and older.
+
+    Returns (ch_corners (N,1,2), ch_ids (N,1), marker_corners, marker_ids),
+    with ch_corners/ch_ids None when fewer than min_corners are found.
+    """
+    global _CHARUCO_DETECTOR
+    if hasattr(cv2.aruco, "CharucoDetector"):          # OpenCV >= 4.8
+        if _CHARUCO_DETECTOR is None:
+            _CHARUCO_DETECTOR = cv2.aruco.CharucoDetector(board)
+        ch_corners, ch_ids, mk_corners, mk_ids = _CHARUCO_DETECTOR.detectBoard(gray)
+        if ch_ids is None or len(ch_ids) < min_corners:
+            return None, None, mk_corners, mk_ids
+        return ch_corners, ch_ids, mk_corners, mk_ids
+    # legacy API (OpenCV < 4.7)
+    ad = cv2.aruco.ArucoDetector(dictionary, cv2.aruco.DetectorParameters())
+    mk_corners, mk_ids, _ = ad.detectMarkers(gray)
+    if mk_ids is None or len(mk_ids) < 4:
+        return None, None, mk_corners, mk_ids
+    retval, ch_corners, ch_ids = cv2.aruco.interpolateCornersCharuco(
+        mk_corners, mk_ids, gray, board)
+    if not retval or retval < min_corners:
+        return None, None, mk_corners, mk_ids
+    return ch_corners, ch_ids, mk_corners, mk_ids

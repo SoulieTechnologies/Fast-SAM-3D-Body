@@ -40,30 +40,23 @@ count = 0
 
 
 def detect_charuco(gray):
-    corners, ids, _ = aruco_detector.detectMarkers(gray)
-    if ids is None or len(ids) < 4:
-        return None, None
-    retval, ch_corners, ch_ids = cv2.aruco.interpolateCornersCharuco(
-        corners, ids, gray, board
-    )
-    if retval < args.min_corners:
-        return None, None
+    ch_corners, ch_ids, _, _ = board_config.detect_charuco(
+        gray, board, dictionary, min_corners=args.min_corners)
     return ch_corners, ch_ids
 
 
 def draw_overlay(frame, gray):
-    corners, ids, _ = aruco_detector.detectMarkers(gray)
     display = frame.copy()
-    if ids is not None and len(ids) >= 4:
-        cv2.aruco.drawDetectedMarkers(display, corners, ids)
-        retval, ch_corners, ch_ids = cv2.aruco.interpolateCornersCharuco(
-            corners, ids, gray, board
-        )
-        if retval >= args.min_corners:
-            cv2.aruco.drawDetectedCornersCharuco(display, ch_corners, ch_ids)
-            cv2.putText(display, f"corners: {retval}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            return display, True
+    ch_corners, ch_ids, mk_corners, mk_ids = board_config.detect_charuco(
+        gray, board, dictionary, min_corners=args.min_corners)
+    if mk_ids is not None and len(mk_ids):
+        cv2.aruco.drawDetectedMarkers(display, mk_corners, mk_ids)
+    if ch_corners is not None:
+        for pt in ch_corners.reshape(-1, 2):
+            cv2.circle(display, tuple(pt.astype(int)), 4, (0, 255, 0), -1)
+        cv2.putText(display, f"corners: {len(ch_corners)}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        return display, True
     cv2.putText(display, "no board", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
     return display, False
