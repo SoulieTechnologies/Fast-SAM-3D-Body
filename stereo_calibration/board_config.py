@@ -1,11 +1,14 @@
 import cv2
 
-# ChArUco board: 11 columns x 3 rows of squares
-BOARD_COLS = 11
-BOARD_ROWS = 8
-SQUARE_SIZE = 0.030   # meters (30 mm — measured on the physical board 2026-07-07)
+# ChArUco board — physical board measured 2026-07-07:
+# 12 x 9 squares of 30 mm, markers 23 mm. 12x9 = 54 markers (ids 0..53), which
+# exceeds DICT_5X5_50 — hence DICT_5X5_100 (its first 50 markers are identical,
+# so ids 0..49 decoded fine before while ids 50..53 were "never detected").
+BOARD_COLS = 12
+BOARD_ROWS = 9
+SQUARE_SIZE = 0.030   # meters (30 mm — measured)
 MARKER_SIZE = 0.023   # meters (23 mm — measured)
-ARUCO_DICT  = cv2.aruco.DICT_5X5_50
+ARUCO_DICT  = cv2.aruco.DICT_5X5_100
 
 
 def make_board():
