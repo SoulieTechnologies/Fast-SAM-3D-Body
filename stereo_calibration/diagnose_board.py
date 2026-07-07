@@ -81,7 +81,9 @@ ratios = sorted({round(board_config.MARKER_SIZE / board_config.SQUARE_SIZE, 2),
                  0.7, 0.75, 0.6, 0.8, 0.5})
 cand_dims = sorted({(board_config.BOARD_COLS, board_config.BOARD_ROWS),
                     (11, 8), (11, 3), (8, 11), (3, 11), (7, 5), (5, 7),
-                    (10, 7), (14, 9)})
+                    (10, 7), (14, 9),
+                    # 6x5 markers observed on the physical board → likely 12x5
+                    (12, 5), (5, 12), (13, 5), (11, 5), (12, 6), (10, 5)})
 results = []
 for (cols, rows), legacy, ratio in itertools.product(cand_dims, (False, True), ratios):
     if cols * rows < n_squares_min:       # board too small for the observed ids
