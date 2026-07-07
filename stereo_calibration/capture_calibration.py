@@ -18,6 +18,10 @@ parser.add_argument("--cam0", type=int, default=0)
 parser.add_argument("--cam1", type=int, default=2)
 parser.add_argument("--min_corners", type=int, default=6,
                     help="Minimum ChArUco corners required to accept a frame")
+parser.add_argument("--width", type=int, default=1280,
+                    help="capture width — MUST match the resolution the demo runs at "
+                         "(intrinsics are resolution-dependent)")
+parser.add_argument("--height", type=int, default=720)
 args = parser.parse_args()
 
 board, dictionary = board_config.make_board()
@@ -32,9 +36,12 @@ cap1 = cv2.VideoCapture(args.cam1)
 assert cap0.isOpened(), f"Cannot open camera {args.cam0}"
 assert cap1.isOpened(), f"Cannot open camera {args.cam1}"
 
-for cap in (cap0, cap1):
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+for i, cap in enumerate((cap0, cap1)):
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))  # USB bandwidth
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+    print(f"cam{i}: {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
+          f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}")
 
 count = 0
 
