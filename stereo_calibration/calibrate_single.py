@@ -61,5 +61,7 @@ print(f"K =\n{K}")
 print(f"D = {D.ravel()}")
 
 out = f"calibration_data/{args.cam}_intrinsics.npz"
+import os
+os.makedirs("calibration_data", exist_ok=True)
 np.savez(out, K=K, D=D, rms=rms, img_size=np.array(img_size))
 print(f"\nSaved → {out}")

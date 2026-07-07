@@ -100,6 +100,8 @@ R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(
     K1, D1, K2, D2, img_size, R, T, alpha=0
 )
 
+import os
+os.makedirs("calibration_data", exist_ok=True)
 out = "calibration_data/stereo_params.npz"
 np.savez(out,
          K1=K1, D1=D1, K2=K2, D2=D2,
