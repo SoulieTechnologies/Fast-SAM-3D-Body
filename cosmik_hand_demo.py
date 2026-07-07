@@ -169,20 +169,31 @@ class CamThread(threading.Thread):
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
         w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        print(f"  cam {index}: {w}x{h}")
+        fcc = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+        fcc_s = "".join(chr((fcc >> (8 * i)) & 0xFF) for i in range(4))
+        print(f"  cam {index}: {w}x{h} fourcc={fcc_s} "
+              f"(nominal {self.cap.get(cv2.CAP_PROP_FPS):.0f} fps)")
         self.frame, self.ts, self.n = None, 0.0, 0
+        self.fps = 0.0                 # MEASURED capture rate (EMA)
         self._lock = threading.Lock()
 
     def run(self):
+        t_prev = None
         while not _STOP.is_set():
             ok, f = self.cap.read()
             if not ok:
                 time.sleep(0.005)
                 continue
+            now = time.time()
+            if t_prev is not None and now > t_prev:
+                inst = 1.0 / (now - t_prev)
+                self.fps = inst if self.fps == 0 else 0.9 * self.fps + 0.1 * inst
+            t_prev = now
             with self._lock:
-                self.frame, self.ts, self.n = f, time.time(), self.n + 1
+                self.frame, self.ts, self.n = f, now, self.n + 1
         self.cap.release()
 
     def latest(self):
@@ -238,15 +249,20 @@ class BodyWorker(threading.Thread):
     def run(self):
         Ks, Ds, Rs, Ts = self.calib
         ncam = len(self.cams)
+        last_ns = [-1] * ncam
         while not _STOP.is_set():
-            frames, tss = [], []
+            # wait for at least one NEW frame — otherwise we recompute the same
+            # image and the reported body rate is inflated beyond the camera rate
+            frames, tss, ns = [], [], []
             for c in self.cams:
-                f, ts, _ = c.latest()
+                f, ts, n = c.latest()
                 frames.append(f)
                 tss.append(ts)
-            if any(f is None for f in frames):
-                time.sleep(0.01)
+                ns.append(n)
+            if any(f is None for f in frames) or all(n == l for n, l in zip(ns, last_ns)):
+                time.sleep(0.002)
                 continue
+            last_ns = ns
             t0 = time.perf_counter()
             kp2d = np.full((ncam, 26, 2), np.nan, np.float32)
             sc = np.zeros((ncam, 26), np.float32)
@@ -374,7 +390,7 @@ class Viz:
         )))
 
     def log(self, seq, t_wall, overlays, kp3d26, g70, body_ms, hand_ms, sync_ms,
-            fps, jpeg_quality=75):
+            fps, cam_fps=None, jpeg_quality=75):
         rr = self.rr
         rr.set_time("frame", sequence=seq)
         rr.set_time("time", timestamp=t_wall)
@@ -383,6 +399,8 @@ class Viz:
             rr.log("timing/hand_ms", rr.Scalars(float(hand_ms)))
         rr.log("timing/sync_ms", rr.Scalars(float(sync_ms)))
         rr.log("timing/body_fps", rr.Scalars(float(fps)))
+        for i, cf in enumerate(cam_fps or []):
+            rr.log(f"timing/cam{i}_capture_fps", rr.Scalars(float(cf)))
         for i, img in enumerate(overlays):
             rr.log(f"cams/cam{i}", rr.Image(
                 cv2.cvtColor(img, cv2.COLOR_BGR2RGB)).compress(jpeg_quality=jpeg_quality))
@@ -559,7 +577,8 @@ def main():
 
             viz.log(nb, t_wall, overlays, res["kp3d"], g70,
                     res["ms"], hres["ms"] if hres else None, res["sync_ms"],
-                    ema or 0.0, jpeg_quality=args.jpeg_quality)
+                    ema or 0.0, cam_fps=[c.fps for c in cams],
+                    jpeg_quality=args.jpeg_quality)
 
             if rec is not None:
                 rec["b3d"].append(res["kp3d"])
@@ -581,9 +600,11 @@ def main():
                 vw.write(overlays[0])
 
             if nb % 60 == 0:
+                cams_fps = " ".join(f"cam{i} {c.fps:.0f}" for i, c in enumerate(cams))
                 print(f"  body {ema or 0:4.1f} Hz  (rtm+tri {res['ms']:.0f} ms, "
                       f"hands {hres['ms'] if hres else 0:.0f} ms, "
-                      f"cam sync spread {res['sync_ms']:.0f} ms)", flush=True)
+                      f"capture: {cams_fps} fps, "
+                      f"sync spread {res['sync_ms']:.0f} ms)", flush=True)
     except KeyboardInterrupt:
         pass
     finally:
