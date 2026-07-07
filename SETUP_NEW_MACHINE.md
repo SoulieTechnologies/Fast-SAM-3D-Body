@@ -157,6 +157,8 @@ First full run: acados generates + compiles the solver (~1-2 min), IPOPT warm-st
 | Symptom | Fix |
 |---|---|
 | `AttributeError: ... BuilderFlag has no attribute 'FP16'` (or EXPLICIT_BATCH) | TensorRT 11 installed → `pip install "tensorrt-cu12<11"` |
+| `libcudart.so.13: cannot open shared object` (onnxruntime) | Latest onnxruntime-gpu is CUDA 13 → `pip install "onnxruntime-gpu==1.22.0"` (CUDA 12 build) |
+| rtmlib on CPU (providers show no CUDAExecutionProvider) | Plain `onnxruntime` shadows the GPU one → `pip uninstall -y onnxruntime onnxruntime-gpu && pip install "onnxruntime-gpu==1.22.0"` |
 | `RuntimeError: operator torchvision::nms does not exist` | torch got bumped (often by ultralytics auto-update) → `pip install torch==2.5.1+cu124 torchvision==0.20.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124 --force-reinstall --no-deps` |
 | `TRT engine not found` | Step 5 not done, or `export TRT_BACKBONE_PATH=<repo>/checkpoints/sam-3d-body-dinov3/backbone_trt/backbone_dinov3_fp16.engine` |
 | HF 401/403 on checkpoint download | Accept the license on the model page + `huggingface-cli login` |
