@@ -229,7 +229,8 @@ class BodyWorker(threading.Thread):
             v = np.isfinite(k).all(1) & (s > 0.1)
             if v.sum() < 6:
                 continue
-            ext = (k[v, 0].ptp() * k[v, 1].ptp()) * float(s.mean())
+            # np.ptp(): the ndarray.ptp() method was removed in NumPy 2.0
+            ext = float(np.ptp(k[v, 0]) * np.ptp(k[v, 1])) * float(s.mean())
             if ext > best_v:
                 best_v, best = ext, (k, s)
         return best if best is not None else (None, None)
