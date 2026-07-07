@@ -211,12 +211,14 @@ class BodyWorker(threading.Thread):
         # detection spike that wrecks the live cadence.
         "tiny": ("https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_tiny_8xb8-300e_humanart-6f3252f9.zip",
                  (416, 416)),
+        "m": ("https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip",
+              (640, 640)),
         "x": ("https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_x_8xb8-300e_humanart-a39d44ed.zip",
               (640, 640)),
     }
 
     def __init__(self, cams, Ks, Ds, Rs, Ts, det_thr, device,
-                 det_model="tiny", det_freq=30):
+                 det_model="m", det_freq=10, tracking=True):
         super().__init__(daemon=True)
         from functools import partial
         import onnxruntime
@@ -231,10 +233,10 @@ class BodyWorker(threading.Thread):
             pose_input_size=(192, 256),
             backend="onnxruntime", device=device,
         )
-        # one tracker per camera (they hold per-stream state); tracking=True
-        # propagates the person bbox between frames so the detector only runs
-        # every det_freq frames (or on loss) instead of causing periodic spikes
-        self.trackers = [PoseTracker(custom, det_frequency=det_freq, tracking=True,
+        # one tracker per camera (they hold per-stream state); with tracking the
+        # person bbox propagates between frames and the detector only runs every
+        # det_freq frames — cheap on GPU, and avoids per-frame detection cost
+        self.trackers = [PoseTracker(custom, det_frequency=det_freq, tracking=tracking,
                                      backend="onnxruntime", device=device)
                          for _ in cams]
         self.cams = cams
@@ -478,11 +480,14 @@ def main():
     p.add_argument("--cap-width", type=int, default=1280)
     p.add_argument("--cap-height", type=int, default=720)
     p.add_argument("--det-thr", type=float, default=0.3)
-    p.add_argument("--det-model", choices=["tiny", "x"], default="tiny",
-                   help="YOLOX person detector size (tiny: fast, no spikes; "
-                        "x: comfi's offline config, heavy)")
-    p.add_argument("--det-freq", type=int, default=30,
+    p.add_argument("--det-model", choices=["tiny", "m", "x"], default="m",
+                   help="YOLOX person detector size (m: good range/speed balance "
+                        "on GPU; tiny: lightest, short range; x: heaviest)")
+    p.add_argument("--det-freq", type=int, default=10,
                    help="run the detector every N frames (tracking covers the rest)")
+    p.add_argument("--no-tracking", action="store_true",
+                   help="disable bbox tracking: detect on every det-freq schedule "
+                        "regardless (use if tracking drifts and loses you)")
     p.add_argument("--box-offset", type=float, default=0.35)
     p.add_argument("--box-size", type=float, default=1.0)
     p.add_argument("--box-scale-mode", choices=["stable", "forearm"], default="stable",
@@ -539,7 +544,8 @@ def main():
     for c in cams:
         c.start()
     body = BodyWorker(cams, Ks, Ds, Rs, Ts, args.det_thr, device="cuda",
-                      det_model=args.det_model, det_freq=args.det_freq)
+                      det_model=args.det_model, det_freq=args.det_freq,
+                      tracking=not args.no_tracking)
     body.start()
     hands = HandWorker(cams[args.hand_cam], body, est.model, hand_cam_int,
                        args, args.hand_cam)
