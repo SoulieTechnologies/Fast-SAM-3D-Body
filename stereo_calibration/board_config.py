@@ -3,8 +3,8 @@ import cv2
 # ChArUco board: 11 columns x 3 rows of squares
 BOARD_COLS = 11
 BOARD_ROWS = 8
-SQUARE_SIZE = 0.034   # meters (34 mm)
-MARKER_SIZE = 0.024   # meters (24 mm)
+SQUARE_SIZE = 0.030   # meters (30 mm — measured on the physical board 2026-07-07)
+MARKER_SIZE = 0.023   # meters (23 mm — measured)
 ARUCO_DICT  = cv2.aruco.DICT_5X5_50
 
 
