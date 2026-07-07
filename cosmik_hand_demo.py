@@ -209,7 +209,7 @@ class BodyWorker(threading.Thread):
         # tiny is plenty to frame one person; keypoint quality comes from RTMPose.
         # The x variant (comfi's offline config) costs a periodic ~100-500 ms
         # detection spike that wrecks the live cadence.
-        "tiny": ("https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_tiny_8xb8-300e_humanart-c2c7a14a.zip",
+        "tiny": ("https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_tiny_8xb8-300e_humanart-6f3252f9.zip",
                  (416, 416)),
         "x": ("https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_x_8xb8-300e_humanart-a39d44ed.zip",
               (640, 640)),
