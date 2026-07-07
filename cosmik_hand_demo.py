@@ -205,22 +205,36 @@ class CamThread(threading.Thread):
 class BodyWorker(threading.Thread):
     """rtmlib body26 on every view → triangulated 26×3 metric (latest slot)."""
 
-    def __init__(self, cams, Ks, Ds, Rs, Ts, det_thr, device):
+    _DET_MODELS = {
+        # tiny is plenty to frame one person; keypoint quality comes from RTMPose.
+        # The x variant (comfi's offline config) costs a periodic ~100-500 ms
+        # detection spike that wrecks the live cadence.
+        "tiny": ("https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_tiny_8xb8-300e_humanart-c2c7a14a.zip",
+                 (416, 416)),
+        "x": ("https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_x_8xb8-300e_humanart-a39d44ed.zip",
+              (640, 640)),
+    }
+
+    def __init__(self, cams, Ks, Ds, Rs, Ts, det_thr, device,
+                 det_model="tiny", det_freq=30):
         super().__init__(daemon=True)
         from functools import partial
+        import onnxruntime
         from rtmlib import Custom, PoseTracker
+        print(f"  onnxruntime providers: {onnxruntime.get_available_providers()}")
+        det_url, det_size = self._DET_MODELS[det_model]
         custom = partial(
             Custom, to_openpose=False,
-            det_class="YOLOX",
-            det="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_x_8xb8-300e_humanart-a39d44ed.zip",
-            det_input_size=(640, 640),
+            det_class="YOLOX", det=det_url, det_input_size=det_size,
             pose_class="RTMPose",
             pose="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-m_simcc-body7_pt-body7-halpe26_700e-256x192-4d3e73dd_20230605.zip",
             pose_input_size=(192, 256),
             backend="onnxruntime", device=device,
         )
-        # one tracker per camera (they hold per-stream state)
-        self.trackers = [PoseTracker(custom, det_frequency=10, tracking=False,
+        # one tracker per camera (they hold per-stream state); tracking=True
+        # propagates the person bbox between frames so the detector only runs
+        # every det_freq frames (or on loss) instead of causing periodic spikes
+        self.trackers = [PoseTracker(custom, det_frequency=det_freq, tracking=True,
                                      backend="onnxruntime", device=device)
                          for _ in cams]
         self.cams = cams
@@ -464,6 +478,11 @@ def main():
     p.add_argument("--cap-width", type=int, default=1280)
     p.add_argument("--cap-height", type=int, default=720)
     p.add_argument("--det-thr", type=float, default=0.3)
+    p.add_argument("--det-model", choices=["tiny", "x"], default="tiny",
+                   help="YOLOX person detector size (tiny: fast, no spikes; "
+                        "x: comfi's offline config, heavy)")
+    p.add_argument("--det-freq", type=int, default=30,
+                   help="run the detector every N frames (tracking covers the rest)")
     p.add_argument("--box-offset", type=float, default=0.35)
     p.add_argument("--box-size", type=float, default=1.0)
     p.add_argument("--box-scale-mode", choices=["stable", "forearm"], default="stable",
@@ -519,7 +538,8 @@ def main():
     cams = [CamThread(i, args.cap_width, args.cap_height) for i in cam_idx]
     for c in cams:
         c.start()
-    body = BodyWorker(cams, Ks, Ds, Rs, Ts, args.det_thr, device="cuda")
+    body = BodyWorker(cams, Ks, Ds, Rs, Ts, args.det_thr, device="cuda",
+                      det_model=args.det_model, det_freq=args.det_freq)
     body.start()
     hands = HandWorker(cams[args.hand_cam], body, est.model, hand_cam_int,
                        args, args.hand_cam)
