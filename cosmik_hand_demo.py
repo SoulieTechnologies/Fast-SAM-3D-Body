@@ -41,8 +41,9 @@ import sys
 parent_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, parent_dir)
 
-# stream_demo sets the TensorRT/speed env flags before torch is imported.
-import stream_demo  # noqa: F401  (import side-effects only)
+# Import first: stream_demo sets the TensorRT/speed env flags before torch is
+# imported. Also reused directly for its TCP keypoint emitter (_emit_server/_EMIT).
+import stream_demo
 
 import argparse
 import threading
@@ -555,9 +556,9 @@ def main():
     hands.start()
 
     if args.emit_hand_port > 0:
-        # reuse stream_demo's generic latest-payload TCP emitter
-        import stream_demo as _sd
-        threading.Thread(target=_sd._emit_server, args=(args.emit_hand_port,),
+        # reuse stream_demo's generic latest-payload TCP emitter (module already
+        # imported at the top of the file for its env-flag side effects)
+        threading.Thread(target=stream_demo._emit_server, args=(args.emit_hand_port,),
                          daemon=True).start()
 
     rec = None
@@ -583,10 +584,9 @@ def main():
 
             # stream the right hand (wrist-relative camera-frame 3D) to the teleop MPC
             if args.emit_hand_port > 0 and hres is not None and hres["k3r"] is not None:
-                import stream_demo as _sd
                 k = (hres["k3r"] - hres["k3r"][20]).astype(np.float32)
-                _sd._EMIT["buf"] = k.tobytes()
-                _sd._EMIT["n"] = hands.n
+                stream_demo._EMIT["buf"] = k.tobytes()
+                stream_demo._EMIT["n"] = hands.n
 
             # overlays
             overlays = []

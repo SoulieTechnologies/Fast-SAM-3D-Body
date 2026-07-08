@@ -70,6 +70,7 @@ class HandTeleop:
         self.args = args
         self.q_pub = self.q_neutral.copy()      # last PUBLISHED (vel-clamped) command
         self.last_kp_t = 0.0
+        self._was_tracking = False              # were we tracking on the previous tick?
         self.joint_names = list(model.names[1:])
         if args.joint_map:
             import yaml
@@ -86,18 +87,29 @@ class HandTeleop:
             # no tracking (or lost for a while): drift slowly back to neutral
             q_des, status = self.q_neutral, "neutral"
             vmax = a.vmax / 4.0
+            self._was_tracking = False
         elif stale > a.stale:
+            self._was_tracking = False
             return self.q_pub, "hold(stale)"       # brief dropout: freeze
         else:
             targets = self.mapper(kp)
             if targets is None:
+                self._was_tracking = False
                 return self.q_pub, "hold(bad kp)"
             tip_t = np.array([targets[_FINGER_BASE[f]] for f in FINGERS])
             static_t = np.array([targets[i] for _, i, _ in self.static_track])
+            # Resync the MPC's virtual state to the actually-published pose when
+            # tracking (re)starts: while neutral/holding, q_pub drifts but the
+            # solver's internal trajectory stays frozen at the last tracked
+            # solution — resuming from that stale state would kick the first step.
+            if not self._was_tracking:
+                self.mpc.warm_start(self.q_pub)
             try:
                 q_des = self.mpc.solve(tip_t, static_t, self.offsets_flat)
                 status = "track"
+                self._was_tracking = True
             except Exception as e:                  # solver failure → hold last
+                self._was_tracking = False
                 return self.q_pub, f"hold(solver: {e})"
             vmax = a.vmax
 

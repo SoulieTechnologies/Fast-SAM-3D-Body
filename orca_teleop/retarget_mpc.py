@@ -118,7 +118,7 @@ def _basis(fwd, lat):
 class PalmMapper:
     """Maps wrist-relative human keypoints into Orca palm-frame 3D targets."""
 
-    def __init__(self, model, tip_offset):
+    def __init__(self, model, tip_offset, scale_frames=15):
         data = model.createData()
         pin.forwardKinematics(model, data, pin.neutral(model))
         pin.updateFramePlacements(model, data)
@@ -131,8 +131,13 @@ class PalmMapper:
                          + np.linalg.norm(P(_F["middle"]["dist"]) - P(_F["middle"]["pip"]))
                          + tip_offset)
         self.scale = None
+        self._scale_buf = []
+        self._scale_frames = scale_frames
 
     def __call__(self, kp21):
+        # defensive re-anchor: live emit and replay already send wrist-relative
+        # keypoints (kp21[20]≈0), but this keeps the mapper correct if a caller
+        # ever passes raw keypoints.
         k = kp21 - kp21[20]
         if not np.isfinite(k[[8, 9, 10, 11]]).all():
             return None
@@ -141,9 +146,15 @@ class PalmMapper:
                          + np.linalg.norm(k[9] - k[10]) + np.linalg.norm(k[8] - k[9]))
             if human_len < 1e-6:
                 return None
-            self.scale = self.orca_len / human_len
-            print(f"  human→orca scale locked: {self.scale:.3f} "
-                  f"(orca chain {self.orca_len*100:.1f} cm)")
+            # Lock the scale on the MEDIAN of the first N valid frames — a single
+            # bad first frame (curled/occluded fingers) must not mis-scale the
+            # whole session. Returns None (caller holds) until enough frames seen.
+            self._scale_buf.append(human_len)
+            if len(self._scale_buf) < self._scale_frames:
+                return None
+            self.scale = self.orca_len / float(np.median(self._scale_buf))
+            print(f"  human→orca scale locked: {self.scale:.3f} (orca chain "
+                  f"{self.orca_len*100:.1f} cm, median of {self._scale_frames} frames)")
         if not np.isfinite(k[[7, 19]]).all():
             return None
         R_h = _basis(k[11], k[19] - k[7])
@@ -358,8 +369,10 @@ def _rx_thread(host, port):
                     msg = buf[:_MSG]
                     buf = buf[_MSG:]
                 if msg is not None:
-                    _RX["n"] = struct.unpack(">I", msg[:4])[0]
+                    # write kp BEFORE n: readers key off n, so this guarantees a
+                    # fresh n is always paired with its matching kp (no 1-frame skew)
                     _RX["kp"] = np.frombuffer(msg[4:], np.float32).reshape(21, 3).copy()
+                    _RX["n"] = struct.unpack(">I", msg[:4])[0]
         except OSError:
             time.sleep(1.0)
 
