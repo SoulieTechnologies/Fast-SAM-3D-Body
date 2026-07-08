@@ -335,11 +335,24 @@ def main():
     viz.initViewer(open=False)
     viz.loadViewerModel("orca")
     viewer = viz.viewer
-    for name, _, w in track:
-        if w >= 10:            # show target spheres for the fingertips only
-            viewer[f"target/{name}"].set_object(
-                mg.Sphere(0.006), mg.MeshLambertMaterial(color=0xFF3333, opacity=0.8))
+    tip_names = [name for name, _, w in track if w >= 10]
+    for name in tip_names:
+        # red = YOUR fingertip target; green = the URDF tip frame (FK) — they
+        # should coincide when tracking is good, and the greens mark where the
+        # model thinks its fingertips are (check them against the mesh tips).
+        viewer[f"target/{name}"].set_object(
+            mg.Sphere(0.006), mg.MeshLambertMaterial(color=0xFF3333, opacity=0.8))
+        viewer[f"urdf_tip/{name}"].set_object(
+            mg.Sphere(0.005), mg.MeshLambertMaterial(color=0x33FF33, opacity=0.9))
     viz.display(pin.neutral(model))
+    # place the green URDF-tip spheres at the neutral pose right away, so the
+    # tip-offset can be checked against the meshes before any tracking starts
+    _d0 = model.createData()
+    pin.forwardKinematics(model, _d0, pin.neutral(model))
+    pin.updateFramePlacements(model, _d0)
+    for name in tip_names:
+        viewer[f"urdf_tip/{name}"].set_transform(
+            mtf.translation_matrix(_d0.oMf[model.getFrameId(name)].translation))
     print(f"  meshcat: {viewer.url()}")
 
     print("[3/4] Building acados MPC (~1 min first time)...")
@@ -385,9 +398,12 @@ def main():
             pin.forwardKinematics(model, data, q)
             pin.updateFramePlacements(model, data)
             for j, (name, i, w) in enumerate(track):
-                if w >= 10 and np.isfinite(targets[j]).all():
-                    viewer[f"target/{name}"].set_transform(
-                        mtf.translation_matrix(targets[j]))
+                if w >= 10:
+                    viewer[f"urdf_tip/{name}"].set_transform(mtf.translation_matrix(
+                        data.oMf[model.getFrameId(name)].translation))
+                    if np.isfinite(targets[j]).all():
+                        viewer[f"target/{name}"].set_transform(
+                            mtf.translation_matrix(targets[j]))
             if len(q_log) % 50 == 0:
                 st = np.array(t_solve[-50:])
                 per = []
