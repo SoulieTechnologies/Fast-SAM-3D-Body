@@ -502,6 +502,9 @@ def main():
     p.add_argument("--output_dir", default="")
     p.add_argument("--no-record", action="store_true")
     p.add_argument("--save-video", action="store_true")
+    p.add_argument("--emit-hand-port", type=int, default=0,
+                   help="if >0: stream the RIGHT hand 21x3 wrist-relative 3D over "
+                        "TCP (for orca_teleop/retarget_mpc.py --listen)")
     args = p.parse_args()
 
     cam_idx = [int(x) for x in args.cams.split(",")]
@@ -551,6 +554,12 @@ def main():
                        args, args.hand_cam)
     hands.start()
 
+    if args.emit_hand_port > 0:
+        # reuse stream_demo's generic latest-payload TCP emitter
+        import stream_demo as _sd
+        threading.Thread(target=_sd._emit_server, args=(args.emit_hand_port,),
+                         daemon=True).start()
+
     rec = None
     if not args.no_record:
         rec = {"b3d": [], "b2d": [], "h2d": [], "g70": [], "ts": []}
@@ -571,6 +580,13 @@ def main():
             hres = hands.latest()
 
             g70 = fuse_goliath70(res["kp3d"], hres, R_world_handcam)
+
+            # stream the right hand (wrist-relative camera-frame 3D) to the teleop MPC
+            if args.emit_hand_port > 0 and hres is not None and hres["k3r"] is not None:
+                import stream_demo as _sd
+                k = (hres["k3r"] - hres["k3r"][20]).astype(np.float32)
+                _sd._EMIT["buf"] = k.tobytes()
+                _sd._EMIT["n"] = hands.n
 
             # overlays
             overlays = []
