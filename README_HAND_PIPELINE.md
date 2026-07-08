@@ -64,32 +64,16 @@ python body_hand_decoder_extractor.py \
 > First run pays a one-time ~1–2 min `torch.compile` cost. Pass the camera intrinsics via
 > `--fx` (a wrong value can make the SAM decoder diverge to NaN); omit for MoGe2 auto-estimate.
 
-**Full-quality reference (slow, ~2–6 FPS, best possible fingers):**
-```bash
-python extract_video.py --video path/to/video.mp4 --output_dir out/ --fx 674.5
-python visualize_skeleton_video.py --npy out/joints_2d.npy --video path/to/video.mp4 --output overlay.mp4
-```
-
-**Body-only real-time (~16 FPS, coarse fingers):**
-```bash
-python realtime_extractor.py --source path/to/video.mp4 --output_dir out/ --headless
-```
-
 ## Key scripts
 
 | Script | What it does |
 |---|---|
 | `body_hand_decoder_extractor.py` | **The 14.6 FPS pipeline** — YOLO body + dedicated hand decoder |
 | `build_backbone_256.py` | Builds the 256² TRT FP16 backbone engine used above |
-| `realtime_extractor.py` | Body-only real-time extraction (TensorRT, ~16 FPS) |
-| `extract_video.py` | Full-quality offline extraction (hand decoder + refinement) |
-| `hand_only_extractor.py` | Hand decoder in isolation (for profiling finger quality) |
-| `visualize_skeleton_video.py` | Overlay a saved `(T,70,2/3)` skeleton on a video |
 | `extract_two_cameras.py` | Two-camera triangulation → metric 3D (removes monocular scale ambiguity). Single-GPU, B2 hand refinement, full mono outputs — the reference version |
 | `extract_dualgpu.py` | Same triangulation, one view per GPU in true parallel (~2x faster, **needs 2 GPUs**; body-only, no B2 hands) |
-| `stream_demo.py`, `stream_client.py` | Live webcam → server inference → MJPEG browser stream |
+| `stream_demo.py` | Live webcam → server inference → MJPEG browser stream (also the TCP keypoint emitter used by the realtime demo) |
 | `convert_backbone_tensorrt.py`, `convert_yolo_pose_trt.py` | TensorRT engine builders |
-| `profile_sam3d_stages.py` | Per-stage timing of the SAM3D model (backbone / decoders) |
 
 ## Notes
 

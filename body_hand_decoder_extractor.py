@@ -197,7 +197,6 @@ def main():
         if sel is None or kps is None or len(kps) <= sel:
             writer.write(frame); t_full.append(time.perf_counter() - t0); continue
         yolo_kp = kps[sel:sel + 1]        # (1,17,3)
-        yolo_box = boxes[sel:sel + 1]
 
         # 2-3. crop around wrists (hand-centred box) + backbone + HAND DECODER only
         k = yolo_kp[0]                       # (17,3)
@@ -230,8 +229,6 @@ def main():
         frame = _draw_hand(frame, kp_r)
         frame = _draw_hand(frame, kp_l)
 
-        if len(t_hand) >= 3:
-            ms = 1e3 * np.mean(t_full[-30:] or [time.perf_counter() - t0])
         t_full.append(time.perf_counter() - t0)
         fps = 1.0 / np.mean(t_full[-30:])
         cv2.putText(frame, f"YOLO body + hand-decoder  {fps:.1f} FPS", (14, 40),

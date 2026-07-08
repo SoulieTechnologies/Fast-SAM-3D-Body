@@ -45,18 +45,6 @@ python stream_demo.py --source test_input/take_01/cam0.mp4 \
 Laptop browser: **http://clear-antares.tailb614a0.ts.net:8094**  (Tailscale — no tunnel)
 or `ssh -L 8094:localhost:8094 …` then http://localhost:8094
 
-## B. LIVE camera on the MacBook → server → browser  (tested, ~16 fps)
-Server (SSH):
-```bash
-cd ~/code/Fast-SAM-3D-Body && conda activate <sam3d-env>
-python stream_demo.py --recv-port 8091 --fx 900 --cx 640 --cy 360 --gpu 7 --port 8094
-```
-MacBook (once: `pip install opencv-python`):
-```bash
-python stream_client.py --host clear-antares.tailb614a0.ts.net --port 8091 --source 0
-```
-Laptop browser: **http://clear-antares.tailb614a0.ts.net:8094**
-
 Notes:
 - Inference ~16 fps < 30 fps capture → server always processes the LATEST frame (drops
   the backlog) → low latency, ~16 fps effective. This is correct, not a bug.

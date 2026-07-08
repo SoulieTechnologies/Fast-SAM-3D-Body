@@ -39,8 +39,7 @@ sys.path.insert(0, parent_dir)
 # stream_demo sets the TensorRT/speed env flags at import time (before torch) and
 # provides the camera receiver, keypoint emitter, person selection and intrinsics
 # helpers — reuse them instead of duplicating.
-import stream_demo as sd
-from stream_demo import (
+from stream_demo import (  # noqa: E402 — sets TRT/speed env flags at import, before torch
     _EMIT, _RECV, _STOP,
     _canonical_M, _emit_server, _estimate_intrinsics, _quiet, _receiver,
     _select_person,

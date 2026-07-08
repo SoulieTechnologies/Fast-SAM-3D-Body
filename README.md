@@ -63,8 +63,8 @@ checkpoints/
 ### Run
 
 ```bash
-# Optimized (torch.compile + TensorRT)
-bash run_demo.sh
+# Live Rerun demo (camera + skeleton overlay + 3D + ACADOS retargeting)
+bash run_rerun_demo.sh
 ```
 
 ### Guides
@@ -72,8 +72,8 @@ bash run_demo.sh
 | Guide | What it covers |
 |---|---|
 | [**README_HAND_PIPELINE.md**](README_HAND_PIPELINE.md) | Real-time body + fine **hand** tracking (~14.6 FPS): YOLO body skeleton + dedicated SAM hand decoder |
-| [**README_REALTIME.md**](README_REALTIME.md) | Real-time **body** extraction (~15 FPS) and every optimization used to get there |
 | [**RUNBOOK_DEMO.md**](RUNBOOK_DEMO.md) | Live demos: **Rerun UI** (camera + skeleton overlay + 3D skeleton + ACADOS retargeting via `run_rerun_demo.sh`) and MJPEG browser streaming |
+| [**orca_teleop/**](orca_teleop/) | Hand teleop: SAM3D hand keypoints → ACADOS MPC retargeting on the Orca hand (`retarget_mpc.py` viser demo + `hand_teleop_node.py` ROS 2 node) |
 
 ### TensorRT Acceleration (Optional)
 

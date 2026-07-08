@@ -255,7 +255,6 @@ def inference_loop(args, estimator, cam_int):
     img_diag = None
     cen = None
     ema = None
-    hs = None          # EMA of the YOLO/SAM torso ratio → hand scale for draw_option_b
     M = None           # gravity+facing alignment (computed once after warmup)
     align_buf = []
     _n = 0
