@@ -390,12 +390,16 @@ def main():
                         mtf.translation_matrix(targets[j]))
             if len(q_log) % 50 == 0:
                 st = np.array(t_solve[-50:])
-                errs = [np.linalg.norm(
-                    data.oMf[model.getFrameId(n)].translation - targets[j])
-                    for j, (n, i, w) in enumerate(track)
-                    if w >= 10 and np.isfinite(targets[j]).all()]
+                per = []
+                for j, (n, i, w) in enumerate(track):
+                    if w >= 10 and np.isfinite(targets[j]).all():
+                        e = np.linalg.norm(
+                            data.oMf[model.getFrameId(n)].translation - targets[j])
+                        per.append((n.split("_")[0], e))
+                detail = "  ".join(f"{f} {1e3*e:.0f}" for f, e in per)
                 print(f"  {len(q_log)} solves | {1e3*st.mean():.1f} ms/solve | "
-                      f"tip err mean {1e3*np.mean(errs):.1f} mm", flush=True)
+                      f"tip err mm: mean {1e3*np.mean([e for _, e in per]):.1f} "
+                      f"[{detail}]", flush=True)
     except KeyboardInterrupt:
         pass
 
