@@ -75,9 +75,12 @@ def build_tracking(tip_weight, mid_weight, mcp_weight):
     return track
 
 
-def add_tip_frames(model, tip_offset):
+def add_tip_frames(model, tip_offsets):
     """Add an OP frame '<finger>_tip' beyond each distal link, along the
-    PIP→distal direction at neutral pose (automatic, no per-link axis guessing)."""
+    PIP→distal direction at neutral pose (automatic, no per-link axis guessing).
+
+    tip_offsets: dict finger→metres (per-finger — the thumb distal differs
+    from the four fingers on the Orca)."""
     data = model.createData()
     q0 = pin.neutral(model)
     pin.forwardKinematics(model, data, q0)
@@ -89,7 +92,7 @@ def add_tip_frames(model, tip_offset):
         p_p = data.oMf[fid_p].translation
         u = p_d - p_p
         u = u / (np.linalg.norm(u) + 1e-12)
-        tip_world = p_d + tip_offset * u
+        tip_world = p_d + tip_offsets[f] * u
         p_local = data.oMf[fid_d].rotation.T @ (tip_world - p_d)
         frame_d = model.frames[fid_d]
         placement = frame_d.placement * pin.SE3(np.eye(3), p_local)
@@ -307,8 +310,11 @@ def main():
     p.add_argument("--w-mcp", type=float, default=0.1)
     p.add_argument("--w-dq", type=float, default=1e-3)
     p.add_argument("--w-u", type=float, default=1e-4)
-    p.add_argument("--tip-offset", type=float, default=0.028,
-                   help="fingertip OP-frame offset beyond the distal link origin (m)")
+    p.add_argument("--tip-offset", type=float, default=0.033,
+                   help="fingertip OP-frame offset for the four fingers (m) — "
+                        "measured: 0.028 sat ~5mm inside the meshes")
+    p.add_argument("--tip-offset-thumb", type=float, default=0.028,
+                   help="fingertip OP-frame offset for the thumb (m)")
     p.add_argument("--free-wrist", action="store_true",
                    help="keep the wrist joint free (default: locked)")
     p.add_argument("--replay-fps", type=float, default=25.0)
@@ -323,9 +329,11 @@ def main():
             model, (coll, vis) = pin.buildReducedModel(
                 model, [coll, vis], wrist, pin.neutral(model))
             print(f"  wrist locked ({len(wrist)} joint) → nq={model.nq}")
-    model = add_tip_frames(model, args.tip_offset)
+    offsets = {f: args.tip_offset for f in _F}
+    offsets["thumb"] = args.tip_offset_thumb
+    model = add_tip_frames(model, offsets)
     track = build_tracking(args.w_tip, args.w_mid, args.w_mcp)
-    mapper = PalmMapper(model, args.tip_offset)
+    mapper = PalmMapper(model, offsets["middle"])
 
     print("[2/4] Meshcat...")
     import meshcat.geometry as mg
