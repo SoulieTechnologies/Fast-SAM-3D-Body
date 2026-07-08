@@ -66,6 +66,16 @@ _FINGER_BASE = {"thumb": 0, "index": 4, "middle": 8, "ring": 12, "pinky": 16}
 PALM_LINK = "R-Carpals_8d1f1041"
 WRIST_JOINT_HINT = "to_TopTower"
 
+# Tip offsets calibrated on the meshes with the viser sliders (2026-07-08) —
+# local distal-frame coordinates, metres.
+TIP_OFFSETS_CALIB = {
+    "thumb":  np.array([0.0009, 0.0000, 0.0270]),
+    "index":  np.array([-0.0085, -0.0000, 0.0400]),
+    "middle": np.array([-0.0085, 0.0000, 0.0400]),
+    "ring":   np.array([-0.0075, 0.0000, 0.0400]),
+    "pinky":  np.array([-0.0085, 0.0000, 0.0330]),
+}
+
 
 def tip_directions(model):
     """Unit PIP→distal direction expressed in each DISTAL LOCAL frame, at
@@ -378,9 +388,11 @@ def main():
     p.add_argument("--w-mcp", type=float, default=0.1)
     p.add_argument("--w-dq", type=float, default=1e-3)
     p.add_argument("--w-u", type=float, default=1e-4)
-    p.add_argument("--tip-offset", type=float, default=0.033,
-                   help="initial tip offset for the four fingers (m), along PIP→distal")
-    p.add_argument("--tip-offset-thumb", type=float, default=0.028)
+    p.add_argument("--tip-offset", type=float, default=None,
+                   help="override: tip offset magnitude for the four fingers (m) "
+                        "along PIP→distal (default: use the slider-calibrated "
+                        "TIP_OFFSETS_CALIB values)")
+    p.add_argument("--tip-offset-thumb", type=float, default=None)
     p.add_argument("--free-wrist", action="store_true")
     p.add_argument("--viser-port", type=int, default=8080)
     p.add_argument("--replay-fps", type=float, default=25.0)
@@ -395,11 +407,15 @@ def main():
             model, (coll, vis) = pin.buildReducedModel(
                 model, [coll, vis], wrist, pin.neutral(model))
             print(f"  wrist locked → nq={model.nq}")
-    dirs = tip_directions(model)
-    offsets = {f: (args.tip_offset_thumb if f == "thumb" else args.tip_offset)
-               * dirs[f] for f in FINGERS}
+    if args.tip_offset is None and args.tip_offset_thumb is None:
+        offsets = {f: TIP_OFFSETS_CALIB[f].copy() for f in FINGERS}
+    else:
+        dirs = tip_directions(model)
+        mag_f = args.tip_offset if args.tip_offset is not None else 0.033
+        mag_t = args.tip_offset_thumb if args.tip_offset_thumb is not None else 0.028
+        offsets = {f: (mag_t if f == "thumb" else mag_f) * dirs[f] for f in FINGERS}
     static_track = build_static_tracking(args.w_mid, args.w_mcp)
-    mapper = PalmMapper(model, args.tip_offset)
+    mapper = PalmMapper(model, float(np.linalg.norm(offsets["middle"])))
 
     print("[2/4] Viser...")
     viz = ViserViz(args.urdf, model, offsets, port=args.viser_port)
