@@ -1,0 +1,43 @@
+# URDF (CAD-hash) joint names → orca_core joint names — orcahand v1 RIGHT.
+#
+# Built by matching each URDF chain (retarget_mpc._F) and its joint limits
+# (rad→deg) against orca_core joint_roms in
+#   orca_core/orca_core/models/orcahand_v1_right/config.yaml
+# e.g. T-TP-R (-45..33°) ↔ thumb_mcp (-50..50), R-T-AP (-18..55°) ↔ thumb_abd (-20..42).
+#
+# Conversion applied by orca_hand_driver_node.py:
+#   orca_deg = sign * degrees(urdf_rad) + offset_deg      (then clipped to ROM)
+#
+# ⚠ Signs are UNVERIFIED on hardware for the *_abd joints (both ROMs are
+# symmetric there, so the direction cannot be inferred offline). Verify each
+# joint with orca_core/scripts/slider_joint.py before the first full teleop,
+# and flip `sign` / tweak `offset_deg` here — the driver reloads at startup.
+#
+# The wrist (R-Carpals_..._to_TopTower-Model_...) is locked in the MPC and
+# deliberately absent: the driver never commands it.
+
+# thumb (URDF chain: T-TP-R → R-T-AP → T-PP → T-DP)
+T-TP-R_1c2b802d_to_R-Carpals_8d1f1041: {joint: thumb_mcp, sign: 1.0, offset_deg: 0.0}
+R-T-AP_a9723101_to_T-TP-R_1c2b802d: {joint: thumb_abd, sign: 1.0, offset_deg: 0.0}
+T-PP_68395e98_to_R-T-AP_a9723101: {joint: thumb_pip, sign: 1.0, offset_deg: 0.0}
+T-DP_b7429e50_to_T-PP_68395e98: {joint: thumb_dip, sign: 1.0, offset_deg: 0.0}
+
+# index
+I-AP-R_d95d02d1_to_R-Carpals_8d1f1041: {joint: index_abd, sign: 1.0, offset_deg: 0.0}
+I-PP_bacbd481_to_I-AP-R_d95d02d1: {joint: index_mcp, sign: 1.0, offset_deg: 0.0}
+I-FingerTipAssembly_ec49c16c_to_I-PP_bacbd481: {joint: index_pip, sign: 1.0, offset_deg: 0.0}
+
+# middle
+M-AP_e04a96f2_to_R-Carpals_8d1f1041: {joint: middle_abd, sign: 1.0, offset_deg: 0.0}
+M-PP_08efa608_to_M-AP_e04a96f2: {joint: middle_mcp, sign: 1.0, offset_deg: 0.0}
+M-FingerTipAssembly_34afb748_to_M-PP_08efa608: {joint: middle_pip, sign: 1.0, offset_deg: 0.0}
+
+# ring
+M-AP_6ec59111_to_R-Carpals_8d1f1041: {joint: ring_abd, sign: 1.0, offset_deg: 0.0}
+M-PP_8660a1eb_to_M-AP_6ec59111: {joint: ring_mcp, sign: 1.0, offset_deg: 0.0}
+M-FingerTipAssembly_424a8e75_to_M-PP_8660a1eb: {joint: ring_pip, sign: 1.0, offset_deg: 0.0}
+
+# pinky
+P-AP_f5e42b61_to_R-Carpals_8d1f1041: {joint: pinky_abd, sign: 1.0, offset_deg: 0.0}
+P-PP_1d411b9b_to_P-AP_f5e42b61: {joint: pinky_mcp, sign: 1.0, offset_deg: 0.0}
+P-FingerTipAssembly_cd219176_to_P-PP_1d411b9b: {joint: pinky_pip, sign: 1.0, offset_deg: 0.0}

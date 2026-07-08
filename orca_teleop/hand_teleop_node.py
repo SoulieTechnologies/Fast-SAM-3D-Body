@@ -18,8 +18,10 @@ Safety layers (in order):
 
 The MPC integrates its own virtual state (the solver's internal trajectory);
 measured hand feedback is not required — the Orca's dynamixels are position
-controlled and low-inertia. Joint names default to the URDF names; pass
---joint-map map.yaml ({urdf_name: driver_name}) to rename for your driver.
+controlled and low-inertia. Publishes RADIANS with the URDF joint names —
+for the real hand, run orca_hand_driver_node.py downstream (it owns the
+URDF→orca_core name/unit/sign mapping via joint_map_v1_right.yaml); only
+use --joint-map here for some other driver that wants renamed radians.
 
 Run (needs rclpy visible + the acados env — source ROS 2 first, see
 nero_touch/launch for the PYTHONPATH pattern):
@@ -31,6 +33,7 @@ Dry-run without ROS (prints instead of publishing):
   python hand_teleop_node.py --listen localhost:8092 --no-ros
 """
 import argparse
+import sys
 import threading
 import time
 from pathlib import Path
@@ -38,12 +41,13 @@ from pathlib import Path
 import numpy as np
 import pinocchio as pin
 
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))  # retarget_mpc lives next to this file — make it importable from any cwd (ros2 run, launch files)
+
 # Reuse the proven retargeting blocks — nothing re-implemented here.
-from retarget_mpc import (FINGERS, TIP_OFFSETS_CALIB, WRIST_JOINT_HINT, _RX,
+from retarget_mpc import (FINGERS, TIP_OFFSETS_CALIB, WRIST_JOINT_HINT, _RX,  # noqa: E402
                           HandMPC, PalmMapper,
                           build_static_tracking, _FINGER_BASE)
-
-_HERE = Path(__file__).resolve().parent
 
 
 class HandTeleop:
