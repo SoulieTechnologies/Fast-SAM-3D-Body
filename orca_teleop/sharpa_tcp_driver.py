@@ -46,9 +46,15 @@ def _rx_thread(host, port):
                     msg = buf[:_MSG]
                     buf = buf[_MSG:]
                 if msg is not None:
-                    # q before n (readers key off n — no torn frame)
-                    _RX["q"] = list(struct.unpack(f">{NJ}f", msg[4:]))
-                    _RX["n"] = struct.unpack(">I", msg[:4])[0]
+                    # payload floats are LITTLE-endian (numpy native on x86 —
+                    # matches the node's astype(float32).tobytes()); only the
+                    # frame counter header is big-endian
+                    q = list(struct.unpack(f"<{NJ}f", msg[4:]))
+                    # garbage guard: a joint command can never exceed ±π
+                    if all(abs(v) < 3.2 for v in q):
+                        # q before n (readers key off n — no torn frame)
+                        _RX["q"] = q
+                        _RX["n"] = struct.unpack(">I", msg[:4])[0]
         except OSError:
             time.sleep(1.0)
 

@@ -105,8 +105,9 @@ class HandTeleop:
 
     def emit(self, q):
         """Mirror the command over TCP (--emit-q) — write buf BEFORE n so a
-        fresh n is always paired with its matching q (same rule as _rx)."""
-        _EMITQ["buf"] = self.q_out(q).astype(np.float32).tobytes()
+        fresh n is always paired with its matching q (same rule as _rx).
+        Explicit little-endian floats (the driver decodes '<f')."""
+        _EMITQ["buf"] = self.q_out(q).astype("<f4").tobytes()
         _EMITQ["n"] += 1
 
     def step(self, now):
