@@ -100,8 +100,10 @@ github.com/sharpa-robotics/sharpa-wave-sdk/releases → `/opt/sharpa-wave-sdk/`)
 ships its own ROS 2 bridge, so there is no custom driver:
 
 ```bash
-# ① its bridge (system python 3.10 + ROS 2 sourced; needs cv_bridge):
-python3 /opt/sharpa-wave-sdk/sample/ROS/wave_ros_server.py
+# ① the joints-only bridge (system python 3.10 + ROS 2 sourced) — trimmed
+#    from the SDK sample: its wave_ros_server.py needs cv_bridge (numpy-1-built
+#    on Humble, breaks with system numpy 2.x) for tactile topics we don't use:
+python3 sharpa_ros_bridge.py
 # ② our teleop node (acados env + ROS 2 sourced):
 python hand_teleop_node.py --listen localhost:8092 --hand sharpa
 ```
