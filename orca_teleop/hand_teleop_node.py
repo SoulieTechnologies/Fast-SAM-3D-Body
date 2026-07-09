@@ -109,34 +109,6 @@ class HandTeleop:
         _EMITQ["buf"] = self.q_out(q).astype(np.float32).tobytes()
         _EMITQ["n"] += 1
 
-
-# ── optional TCP re-emit of the published command (--emit-q) ─────────────────
-# Same [>I frame][n×float32] framing as the keypoint stream. Lets a driver in
-# a DIFFERENT python env (e.g. sharpa_tcp_driver.py on the system python with
-# the Wave SDK) consume the commands without sharing rclpy with the acados env.
-
-_EMITQ = {"buf": b"", "n": 0}
-
-
-def _emitq_server(port):
-    srv = socket.create_server(("0.0.0.0", port))
-    print(f"emitting q on tcp :{port}")
-    while True:
-        conn, _ = srv.accept()
-        threading.Thread(target=_emitq_client, args=(conn,), daemon=True).start()
-
-
-def _emitq_client(conn):
-    last = -1
-    try:
-        while True:
-            if _EMITQ["n"] != last and _EMITQ["buf"]:
-                last = _EMITQ["n"]
-                conn.sendall(struct.pack(">I", last) + _EMITQ["buf"])
-            time.sleep(0.004)
-    except OSError:
-        conn.close()
-
     def step(self, now):
         """One control tick → (q_command, status_str). Never raises."""
         a = self.args
@@ -179,6 +151,34 @@ def _emitq_client(conn):
                              self.model.lowerPositionLimit,
                              self.model.upperPositionLimit)
         return self.q_pub, status
+
+
+# ── optional TCP re-emit of the published command (--emit-q) ─────────────────
+# Same [>I frame][n×float32] framing as the keypoint stream. Lets a driver in
+# a DIFFERENT python env (e.g. sharpa_tcp_driver.py on the system python with
+# the Wave SDK) consume the commands without sharing rclpy with the acados env.
+
+_EMITQ = {"buf": b"", "n": 0}
+
+
+def _emitq_server(port):
+    srv = socket.create_server(("0.0.0.0", port))
+    print(f"emitting q on tcp :{port}")
+    while True:
+        conn, _ = srv.accept()
+        threading.Thread(target=_emitq_client, args=(conn,), daemon=True).start()
+
+
+def _emitq_client(conn):
+    last = -1
+    try:
+        while True:
+            if _EMITQ["n"] != last and _EMITQ["buf"]:
+                last = _EMITQ["n"]
+                conn.sendall(struct.pack(">I", last) + _EMITQ["buf"])
+            time.sleep(0.004)
+    except OSError:
+        conn.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
