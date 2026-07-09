@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
-"""COSMIK body + SAM hand-decoder fingers — multi-camera metric 3D keypoints.
+"""COSMIK/NLF body + SAM hand-decoder fingers — multi-camera metric 3D keypoints.
 
-Replaces the SAM3D/YOLO body with the COSMIK approach: RTMPose "body26"
-(Halpe-26) runs on every calibrated camera view, the 2D keypoints are
-triangulated into METRIC 3D (removing the monocular scale ambiguity), and the
-dedicated SAM hand decoder adds faithful fingers from one view. No IK here —
-this produces and records the keypoints (Rerun UI + .npy), ready to feed the
-ACADOS pipeline later.
+Body backbone = RT-COSMIK's NLF path (branch nlf_humble): YOLO person
+detection + the NLF torchscript predict, per calibrated view, the 2D pixel
+positions of 43 ANATOMICAL MARKERS (SMPL-X canonical vertices — mocap-style
+RASI/C7/RELB+RMELB/RWRI+RMWRI...). The 2D markers are triangulated into
+METRIC 3D (removing the monocular scale ambiguity), and the dedicated SAM
+hand decoder adds faithful fingers from one view. No IK here — this produces
+and records the keypoints (Rerun UI + .npy), ready to feed the ACADOS
+pipeline later.
 
 Architecture (decoupled rates — the body never waits for the hands):
   capture thread per camera  → latest frame + timestamp (soft sync)
-  body worker    (~25-30 Hz) → rtmlib body26 per view → triangulate 26×3 metric
+  body worker                → YOLO + NLF per view (batched) → triangulate 43×3 metric
   hand worker    (~15-20 Hz) → SAM hand decoder on the hand-cam wrist crops
   main loop      (body rate) → fuse (fingers re-anchored at the metric wrists),
                                Rerun logging, recording
 
 Outputs (in --output_dir):
-  body26_3d.npy      (T, 26, 3)      metric 3D, cam0/world frame
-  body26_2d.npy      (T, ncam, 26, 2)
+  markers_3d.npy     (T, 43, 3)      metric 3D, cam0/world frame (MARKER_NAMES order)
+  markers_2d.npy     (T, ncam, 43, 2)
   hands_2d.npy       (T, 42, 2)      hand-cam pixels (right 0-20, left 21-41)
-  goliath70_3d.npy   (T, 70, 3)      body26 mapped to Goliath + anchored fingers
+  goliath70_3d.npy   (T, 70, 3)      markers mapped to Goliath + anchored fingers
   timestamps.npy     (T,)
   overlay_cam0.mp4   (with --save-video)
 
@@ -27,11 +29,15 @@ Calibration (--calib) accepts:
   - stereo npz  : keys K1,D1,K2,D2,R,T          (2 cameras, cam0 = reference)
   - multi npz   : keys K0..K{n},D0..,R0..,T0..  (R0=I, T0=0 for the reference)
 
-Run (sam3d env; pip install rtmlib):
+Setup (sam3d env): pip install ultralytics meshcat; clone RT-COSMIK branch
+nlf_humble (default location ~/code/RT-COSMIK, override with --rtcosmik) and
+drop the NLF weights in <rtcosmik>/weights/ (see --nlf-weights/--cano).
+
+Run:
   # multi-camera (metric 3D):
   python cosmik_hand_demo.py --cams 0,1 --calib stereo_params.npz \
       --checkpoint_dir ./checkpoints/sam-3d-body-dinov3 --rerun-mode native
-  # MONO mode (no calib yet): body26 2D + hand-decoder fingers, no metric body 3D
+  # MONO mode (no calib yet): markers 2D + hand-decoder fingers, no metric body 3D
   python cosmik_hand_demo.py --cams 0 --fx 540 --rerun-mode native
 """
 
@@ -59,36 +65,95 @@ from notebook.utils import setup_sam_3d_body
 from rerun_demo import _H_WRIST, _hand_decoder_step
 
 # ═══════════════════════════════════════════════════════════════════════════
-# HALPE-26 (rtmlib body26) — names, skeleton, COSMIK-26 → Goliath-70 map
+# NLF ANATOMICAL MARKERS — names, SMPL-X vertex ids, skeleton, Goliath-70 map
+# (markers + vertex ids come from RT-COSMIK settings.py, branch nlf_humble)
 # ═══════════════════════════════════════════════════════════════════════════
 
-BODY26_NAMES = [
-    "nose", "left_eye", "right_eye", "left_ear", "right_ear",
-    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
-    "left_wrist", "right_wrist", "left_hip", "right_hip",
-    "left_knee", "right_knee", "left_ankle", "right_ankle",
-    "head", "neck", "mid_hip",
-    "left_big_toe", "right_big_toe", "left_small_toe", "right_small_toe",
-    "left_heel", "right_heel",
+MARKER_NAMES = [
+    "RASI", "LASI", "RPSI", "LPSI",                                    # pelvis
+    "C7", "T11", "T6", "RSHO", "LSHO", "RELB", "LELB", "RMELB",        # upper
+    "LMELB", "RWRI", "LWRI", "RMWRI", "LMWRI",
+    "RTHU", "LTHU", "RMID", "LMID", "RPIN", "LPIN",                    # hands
+    "RKNE", "LKNE", "RMKNE", "LMKNE", "RANK", "LANK", "RMANK", "LMANK",  # legs
+    "R5MHD", "L5MHD", "RTOE", "LTOE", "RHEE", "LHEE",                  # feet
+    "Nose", "Head", "REar", "LEar", "REye", "LEye",                    # face
+]
+NMK = len(MARKER_NAMES)                                                # 43
+_M = {n: i for i, n in enumerate(MARKER_NAMES)}
+
+# SMPL-X canonical vertex ids, one per marker (same order as MARKER_NAMES)
+NLF_INDICES = [
+    8421, 5727, 8371, 5677,
+    5484, 5489, 5500, 6629, 3878, 7040, 4302, 7105, 4369, 7584, 4848, 7457, 4721,
+    8079, 5361, 7794, 5058, 8022, 5286,
+    6401, 3640, 6407, 3646, 8576, 5882, 8680, 8892,
+    8474, 5780, 8463, 5770, 8635, 8846,
+    9120, 9002, 616, 6, 9929, 9448,
 ]
 
-# COSMIK/RT-COSMIK body26 skeleton (same edge list as their visualisation cfg)
-BODY26_EDGES = [
-    (0, 1), (0, 2), (1, 3), (2, 4), (3, 5), (4, 6), (1, 2), (5, 18), (6, 18),
-    (17, 18), (5, 7), (7, 9), (6, 8), (8, 10), (18, 19),
-    (11, 13), (13, 15), (15, 20), (15, 22), (15, 24),
-    (12, 14), (14, 16), (16, 21), (16, 23), (16, 25),
-    (12, 19), (11, 19),
+# display skeleton over the LATERAL marker chain (medial markers drawn as dots)
+MARKER_EDGES = [(_M[a], _M[b]) for a, b in [
+    ("Nose", "REar"), ("Nose", "LEar"), ("Head", "Nose"), ("C7", "Head"),
+    ("C7", "RSHO"), ("C7", "LSHO"), ("C7", "T6"), ("T6", "T11"),
+    ("T11", "RPSI"), ("T11", "LPSI"), ("RPSI", "RASI"), ("LPSI", "LASI"),
+    ("RASI", "LASI"),
+    ("RSHO", "RELB"), ("RELB", "RWRI"), ("LSHO", "LELB"), ("LELB", "LWRI"),
+    ("RWRI", "RTHU"), ("RWRI", "RMID"), ("RWRI", "RPIN"),
+    ("LWRI", "LTHU"), ("LWRI", "LMID"), ("LWRI", "LPIN"),
+    ("RASI", "RKNE"), ("RKNE", "RANK"), ("RANK", "RTOE"), ("RANK", "RHEE"),
+    ("LASI", "LKNE"), ("LKNE", "LANK"), ("LANK", "LTOE"), ("LANK", "LHEE"),
+]]
+
+# marker → Goliath-70 slot (single markers; elbow/wrist joint centres are the
+# lateral+medial midpoints and are filled separately in fuse_goliath70).
+MARKER2GOLIATH = {_M[m]: g for m, g in {
+    "Nose": 0, "LEye": 1, "REye": 2, "LEar": 3, "REar": 4,
+    "LSHO": 5, "RSHO": 6,
+    "LASI": 9, "RASI": 10, "LKNE": 11, "RKNE": 12, "LANK": 13, "RANK": 14,
+    "LTOE": 15, "L5MHD": 16, "LHEE": 17, "RTOE": 18, "R5MHD": 19, "RHEE": 20,
+    "C7": 69,
+}.items()}
+# lateral/medial pairs → Goliath joint-centre slots (elbows 7/8, wrists 62/41)
+MARKER_PAIRS2GOLIATH = [(_M["LELB"], _M["LMELB"], 7), (_M["RELB"], _M["RMELB"], 8),
+                        (_M["LWRI"], _M["LMWRI"], 62), (_M["RWRI"], _M["RMWRI"], 41)]
+
+# wrist joint centres (lateral, medial) used for hand crops and finger anchors
+R_WRIST_PAIR = (_M["RWRI"], _M["RMWRI"])
+L_WRIST_PAIR = (_M["LWRI"], _M["LMWRI"])
+
+
+def _pair_mid(kp, a, b):
+    """Midpoint of a lateral/medial marker pair; falls back to whichever is
+    finite; NaN if neither."""
+    fa, fb = np.isfinite(kp[a]).all(), np.isfinite(kp[b]).all()
+    if fa and fb:
+        return 0.5 * (kp[a] + kp[b])
+    return kp[a] if fa else (kp[b] if fb else np.full(kp.shape[-1], np.nan, kp.dtype))
+
+
+# COCO-17 synthesis for the hand-crop guide (_hand_decoder_step) —
+# (coco_idx, marker or (lateral, medial) pair)
+_COCO17_FROM_MARKERS = [
+    (0, "Nose"), (1, "LEye"), (2, "REye"), (3, "LEar"), (4, "REar"),
+    (5, "LSHO"), (6, "RSHO"),
+    (7, ("LELB", "LMELB")), (8, ("RELB", "RMELB")),
+    (9, ("LWRI", "LMWRI")), (10, ("RWRI", "RMWRI")),
+    (11, "LASI"), (12, "RASI"), (13, "LKNE"), (14, "RKNE"),
+    (15, "LANK"), (16, "RANK"),
 ]
 
-# COSMIK-26 index → Goliath-70 index (same mapping as the comfi IK scripts;
-# head/mid_hip/small_toes have no Goliath slot and are skipped).
-COSMIK2GOLIATH = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8,
-                  9: 62, 10: 41, 11: 9, 12: 10, 13: 11, 14: 12, 15: 13, 16: 14,
-                  18: 69, 20: 15, 21: 18, 24: 17, 25: 20,
-                  22: 16, 23: 19}
 
-L_WRI26, R_WRI26 = 9, 10
+def markers_to_coco17(kp2d, sc, thr):
+    """(43,2) markers + scores → (17,2) COCO pixels (NaN where below thr)."""
+    kp = kp2d.copy()
+    kp[sc < thr] = np.nan
+    k17 = np.full((17, 2), np.nan, np.float32)
+    for ci, src in _COCO17_FROM_MARKERS:
+        if isinstance(src, tuple):
+            k17[ci] = _pair_mid(kp, _M[src[0]], _M[src[1]])
+        else:
+            k17[ci] = kp[_M[src]]
+    return k17
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -204,64 +269,43 @@ class CamThread(threading.Thread):
 
 
 class BodyWorker(threading.Thread):
-    """rtmlib body26 on every view → triangulated 26×3 metric (latest slot)."""
+    """YOLO + NLF markers on every view (batched) → triangulated 43×3 metric.
 
-    _DET_MODELS = {
-        # tiny is plenty to frame one person; keypoint quality comes from RTMPose.
-        # The x variant (comfi's offline config) costs a periodic ~100-500 ms
-        # detection spike that wrecks the live cadence.
-        "tiny": ("https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_tiny_8xb8-300e_humanart-6f3252f9.zip",
-                 (416, 416)),
-        "m": ("https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip",
-              (640, 640)),
-        "x": ("https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_x_8xb8-300e_humanart-a39d44ed.zip",
-              (640, 640)),
-    }
+    Wraps RT-COSMIK's NLFEstimator (branch nlf_humble): one batched YOLO
+    person detection + one batched NLF call over all views, with per-camera
+    person box locking handled inside the estimator.
+    """
 
-    def __init__(self, cams, Ks, Ds, Rs, Ts, det_thr, device,
-                 det_model="m", det_freq=10, tracking=True):
+    def __init__(self, cams, Ks, Ds, Rs, Ts, det_thr, args):
         super().__init__(daemon=True)
-        from functools import partial
-        import onnxruntime
-        from rtmlib import Custom, PoseTracker
-        print(f"  onnxruntime providers: {onnxruntime.get_available_providers()}")
-        det_url, det_size = self._DET_MODELS[det_model]
-        custom = partial(
-            Custom, to_openpose=False,
-            det_class="YOLOX", det=det_url, det_input_size=det_size,
-            pose_class="RTMPose",
-            pose="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-m_simcc-body7_pt-body7-halpe26_700e-256x192-4d3e73dd_20230605.zip",
-            pose_input_size=(192, 256),
-            backend="onnxruntime", device=device,
+        rtcosmik = os.path.expanduser(args.rtcosmik)
+        src = os.path.join(rtcosmik, "src")
+        if not os.path.isdir(src):
+            raise SystemExit(f"RT-COSMIK not found at {rtcosmik} — clone branch "
+                             "nlf_humble there or pass --rtcosmik")
+        sys.path.insert(0, src)
+        from rtcosmik.nlf.nlf import NLFEstimator   # needs: ultralytics, meshcat
+        nlf_w = args.nlf_weights or os.path.join(
+            rtcosmik, "weights", "nlf", "nlf_s_multi_0.2.2.torchscript")
+        cano = args.cano or os.path.join(
+            rtcosmik, "weights", "canonical_verts", "smplx.npy")
+        for path in (nlf_w, cano):
+            if not os.path.isfile(path):
+                raise SystemExit(f"missing NLF asset: {path} (see docstring)")
+        self.est = NLFEstimator(
+            yolo_path=args.yolo_weights, nlf_path=nlf_w, cano_path=cano,
+            image_size=(args.cap_width, args.cap_height),
+            cam_Ks=[K.astype(np.float32) for K in Ks],
+            indices=NLF_INDICES, conf=args.yolo_conf, imgsz=args.yolo_imgsz,
+            device="cuda:0",
         )
-        # one tracker per camera (they hold per-stream state); with tracking the
-        # person bbox propagates between frames and the detector only runs every
-        # det_freq frames — cheap on GPU, and avoids per-frame detection cost
-        self.trackers = [PoseTracker(custom, det_frequency=det_freq, tracking=tracking,
-                                     backend="onnxruntime", device=device)
-                         for _ in cams]
+        self.size = (args.cap_width, args.cap_height)
         self.cams = cams
         self.calib = (Ks, Ds, Rs, Ts)
         self.det_thr = det_thr
-        self.result = None            # dict: kp2d (ncam,26,2), scores, kp3d, ts, ms
+        self.result = None            # dict: kp2d (ncam,43,2), scores, kp3d, ts, ms
         self.n = 0
         self._lock = threading.Lock()
-
-    @staticmethod
-    def _main_person(kps, scores):
-        """Largest bbox extent × mean score → (26,2), (26,) or (None, None)."""
-        if kps is None or len(kps) == 0:
-            return None, None
-        best, best_v = None, -1.0
-        for k, s in zip(kps, scores):
-            v = np.isfinite(k).all(1) & (s > 0.1)
-            if v.sum() < 6:
-                continue
-            # np.ptp(): the ndarray.ptp() method was removed in NumPy 2.0
-            ext = float(np.ptp(k[v, 0]) * np.ptp(k[v, 1])) * float(s.mean())
-            if ext > best_v:
-                best_v, best = ext, (k, s)
-        return best if best is not None else (None, None)
 
     def run(self):
         Ks, Ds, Rs, Ts = self.calib
@@ -280,15 +324,31 @@ class BodyWorker(threading.Thread):
                 time.sleep(0.002)
                 continue
             last_ns = ns
+            W, H = self.size
+            for f in frames:
+                if f.shape[1] != W or f.shape[0] != H:
+                    # hard error: silently resizing would break the calibration
+                    # (K is for the capture resolution) → garbage triangulation
+                    raise SystemExit(
+                        f"camera frame is {f.shape[1]}x{f.shape[0]}, expected "
+                        f"{W}x{H} (--cap-width/height must match the calib)")
             t0 = time.perf_counter()
-            kp2d = np.full((ncam, 26, 2), np.nan, np.float32)
-            sc = np.zeros((ncam, 26), np.float32)
-            for i, f in enumerate(frames):
-                kps, scores = self.trackers[i](f)
-                k, s = self._main_person(kps, scores)
-                if k is not None:
-                    kp2d[i] = k[:26]
-                    sc[i] = s[:26]
+            out, _, _, _ = self.est.estimate_from_frames(frames)
+            kp2d = np.full((ncam, NMK, 2), np.nan, np.float32)
+            sc = np.zeros((ncam, NMK), np.float32)
+            p2d_all = out["poses2d"]
+            unc_all = out.get("uncertainties") if hasattr(out, "get") else None
+            for i in range(ncam):
+                p = p2d_all[i]
+                if p is None or len(p) == 0 or p[0] is None:
+                    continue                      # no (locked) person in this view
+                kp2d[i] = p[0].detach().float().cpu().numpy()
+                if unc_all is not None and unc_all[i] is not None and len(unc_all[i]):
+                    # NLF uncertainty (higher = worse) → score in [0,1]
+                    u = unc_all[i][0].detach().float().cpu().numpy()
+                    sc[i] = np.clip(1.0 - u, 0.0, 1.0)
+                else:
+                    sc[i] = np.isfinite(kp2d[i]).all(1).astype(np.float32)
             if ncam >= 2:
                 kp2d_masked = kp2d.copy()
                 kp2d_masked[sc < self.det_thr] = np.nan
@@ -296,7 +356,7 @@ class BodyWorker(threading.Thread):
                                              thr=self.det_thr)
             else:
                 # MONO mode: no metric body 3D possible with a single view
-                kp3d = np.full((26, 3), np.nan, np.float32)
+                kp3d = np.full((NMK, 3), np.nan, np.float32)
             ms = (time.perf_counter() - t0) * 1e3
             with self._lock:
                 self.result = {"kp2d": kp2d, "scores": sc, "kp3d": kp3d,
@@ -310,7 +370,7 @@ class BodyWorker(threading.Thread):
 
 
 class HandWorker(threading.Thread):
-    """SAM hand decoder on the hand camera, guided by that view's body26 wrists."""
+    """SAM hand decoder on the hand camera, guided by that view's NLF wrists."""
 
     def __init__(self, cam, body, model, cam_int, args, view_idx):
         super().__init__(daemon=True)
@@ -329,9 +389,10 @@ class HandWorker(threading.Thread):
                 time.sleep(0.003)
                 continue
             last_body = nb
-            # COCO-17 layout expected by _hand_decoder_step = body26[:17]
-            k17 = res["kp2d"][self.view][:17].copy()
-            k17[res["scores"][self.view][:17] < self.args.det_thr] = np.nan
+            # COCO-17 layout expected by _hand_decoder_step, synthesized from
+            # the NLF markers (wrist/elbow = lateral+medial midpoints)
+            k17 = markers_to_coco17(res["kp2d"][self.view],
+                                    res["scores"][self.view], self.args.det_thr)
             t0 = time.perf_counter()
             kp_r, kp_l, k3r, k3l, rbox, lbox = _hand_decoder_step(
                 self.model, frame, k17, self.cam_int, self.args)
@@ -351,25 +412,30 @@ class HandWorker(threading.Thread):
 # FUSION — fingers re-anchored at the metric wrists
 # ═══════════════════════════════════════════════════════════════════════════
 
-def fuse_goliath70(kp3d26, hands, R_world_handcam):
-    """(26,3) metric body + decoder hands → (70,3) Goliath, world/cam0 frame.
+def fuse_goliath70(mk3d, hands, R_world_handcam):
+    """(43,3) metric markers + decoder hands → (70,3) Goliath, world/cam0 frame.
 
-    Decoder hand offsets are rotated from the hand-camera frame into the world
-    frame, then anchored at the triangulated (metric) wrist. The decoder's own
-    hand size is kept (MHR average-hand scale, roughly metric).
+    Elbow/wrist Goliath slots get the lateral+medial marker midpoints (true
+    joint centres). Decoder hand offsets are rotated from the hand-camera
+    frame into the world frame, then anchored at the triangulated (metric)
+    wrist centre. The decoder's own hand size is kept (MHR average-hand
+    scale, roughly metric).
     """
     g = np.full((70, 3), np.nan, np.float32)
-    for c, gi in COSMIK2GOLIATH.items():
-        g[gi] = kp3d26[c]
+    for m, gi in MARKER2GOLIATH.items():
+        g[gi] = mk3d[m]
+    for a, b, gi in MARKER_PAIRS2GOLIATH:
+        g[gi] = _pair_mid(mk3d, a, b)
     if hands is None:
         return g
-    for dec, sl, wri26, disp in ((hands["k3r"], slice(21, 42), R_WRI26, (+0.15, 0, 0.5)),
-                                 (hands["k3l"], slice(42, 63), L_WRI26, (-0.15, 0, 0.5))):
+    for dec, sl, pair, disp in ((hands["k3r"], slice(21, 42), R_WRIST_PAIR, (+0.15, 0, 0.5)),
+                                (hands["k3l"], slice(42, 63), L_WRIST_PAIR, (-0.15, 0, 0.5))):
         if dec is None:
             continue
         off = (dec - dec[_H_WRIST]) @ R_world_handcam.T
-        if np.isfinite(kp3d26[wri26]).all():
-            g[sl] = kp3d26[wri26] + off              # metric wrist anchor
+        wrist = _pair_mid(mk3d, *pair)
+        if np.isfinite(wrist).all():
+            g[sl] = wrist + off                      # metric wrist anchor
         else:
             # MONO mode: no metric wrist — anchor at a fixed display position
             g[sl] = np.asarray(disp, np.float32) + off
@@ -406,7 +472,7 @@ class Viz:
             column_shares=[2, 3],
         )))
 
-    def log(self, seq, t_wall, overlays, kp3d26, g70, body_ms, hand_ms, sync_ms,
+    def log(self, seq, t_wall, overlays, mk3d, g70, body_ms, hand_ms, sync_ms,
             fps, cam_fps=None, jpeg_quality=75):
         rr = self.rr
         rr.set_time("frame", sequence=seq)
@@ -421,13 +487,13 @@ class Viz:
         for i, img in enumerate(overlays):
             rr.log(f"cams/cam{i}", rr.Image(
                 cv2.cvtColor(img, cv2.COLOR_BGR2RGB)).compress(jpeg_quality=jpeg_quality))
-        # 3D: body26 skeleton (metric) + Goliath fingers
-        v = np.isfinite(kp3d26).all(1)
+        # 3D: NLF marker skeleton (metric) + Goliath fingers
+        v = np.isfinite(mk3d).all(1)
         if v.any():
-            rr.log("world/body/joints", rr.Points3D(kp3d26[v], radii=0.015,
+            rr.log("world/body/joints", rr.Points3D(mk3d[v], radii=0.015,
                                                     colors=[0, 230, 0]))
-            strips = [[kp3d26[a].tolist(), kp3d26[b].tolist()]
-                      for a, b in BODY26_EDGES if v[a] and v[b]]
+            strips = [[mk3d[a].tolist(), mk3d[b].tolist()]
+                      for a, b in MARKER_EDGES if v[a] and v[b]]
             if strips:
                 rr.log("world/body/bones",
                        rr.LineStrips3D(strips, colors=[255, 230, 0], radii=0.006))
@@ -449,13 +515,14 @@ class Viz:
                        rr.LineStrips3D(strips, colors=[80, 170, 255], radii=0.003))
 
 
-def draw_body26(img, kp, sc, thr):
-    for a, b in BODY26_EDGES:
-        if sc[a] > thr and sc[b] > thr:
+def draw_markers(img, kp, sc, thr):
+    ok = (sc > thr) & np.isfinite(kp).all(1)
+    for a, b in MARKER_EDGES:
+        if ok[a] and ok[b]:
             cv2.line(img, tuple(kp[a].astype(int)), tuple(kp[b].astype(int)),
                      (0, 200, 255), 2, cv2.LINE_AA)
-    for j in range(26):
-        if sc[j] > thr:
+    for j in range(NMK):
+        if ok[j]:
             cv2.circle(img, tuple(kp[j].astype(int)), 3, (0, 140, 255), -1, cv2.LINE_AA)
     return img
 
@@ -465,7 +532,7 @@ def draw_body26(img, kp, sc, thr):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
-    p = argparse.ArgumentParser(description="COSMIK body26 (multi-cam metric) + SAM hand decoder")
+    p = argparse.ArgumentParser(description="NLF markers (multi-cam metric) + SAM hand decoder")
     p.add_argument("--cams", default="0", help="comma-separated camera indices")
     p.add_argument("--calib", default="", help="calibration npz (see docstring); "
                    "required for >=2 cameras, optional in mono mode")
@@ -480,15 +547,22 @@ def main():
     p.add_argument("--checkpoint_dir", default="./checkpoints/sam-3d-body-dinov3")
     p.add_argument("--cap-width", type=int, default=1280)
     p.add_argument("--cap-height", type=int, default=720)
-    p.add_argument("--det-thr", type=float, default=0.3)
-    p.add_argument("--det-model", choices=["tiny", "m", "x"], default="m",
-                   help="YOLOX person detector size (m: good range/speed balance "
-                        "on GPU; tiny: lightest, short range; x: heaviest)")
-    p.add_argument("--det-freq", type=int, default=10,
-                   help="run the detector every N frames (tracking covers the rest)")
-    p.add_argument("--no-tracking", action="store_true",
-                   help="disable bbox tracking: detect on every det-freq schedule "
-                        "regardless (use if tracking drifts and loses you)")
+    p.add_argument("--det-thr", type=float, default=0.3,
+                   help="per-marker score threshold for triangulation/drawing")
+    p.add_argument("--rtcosmik", default="~/code/RT-COSMIK",
+                   help="RT-COSMIK clone (branch nlf_humble) — provides the "
+                        "NLFEstimator code and the default weight locations")
+    p.add_argument("--nlf-weights", default="",
+                   help="NLF torchscript (default <rtcosmik>/weights/nlf/"
+                        "nlf_s_multi_0.2.2.torchscript)")
+    p.add_argument("--cano", default="",
+                   help="SMPL-X canonical vertices npy (default <rtcosmik>/"
+                        "weights/canonical_verts/smplx.npy)")
+    p.add_argument("--yolo-weights", default="yolov10n.pt",
+                   help="ultralytics person detector (.pt auto-downloads; point "
+                        "to a .engine for TensorRT)")
+    p.add_argument("--yolo-conf", type=float, default=0.2)
+    p.add_argument("--yolo-imgsz", type=int, default=640)
     p.add_argument("--box-offset", type=float, default=0.35)
     p.add_argument("--box-size", type=float, default=1.0)
     p.add_argument("--box-scale-mode", choices=["stable", "forearm"], default="stable",
@@ -515,13 +589,13 @@ def main():
         base = np.linalg.norm(Ts[1]) if ncam > 1 else 0.0
         print(f"  calib: {ncam} cameras, baseline cam0-cam1 ≈ {base * 100:.1f} cm")
     elif ncam == 1:
-        # MONO mode: intrinsics from --fx (used by the hand decoder only)
+        # MONO mode: intrinsics from --fx (used by NLF + the hand decoder)
         cx = args.cx if args.cx > 0 else args.cap_width / 2.0
         cy = args.cy if args.cy > 0 else args.cap_height / 2.0
         K = np.array([[args.fx, 0, cx], [0, args.fy or args.fx, cy], [0, 0, 1]],
                      np.float64)
         Ks, Ds, Rs, Ts = [K], [np.zeros(5)], [np.eye(3)], [np.zeros(3)]
-        print(f"  MONO MODE — body26 is 2D only (metric 3D needs >=2 calibrated "
+        print(f"  MONO MODE — markers are 2D only (metric 3D needs >=2 calibrated "
               f"cameras). Hands shown in 3D at a fixed anchor. fx={args.fx:.0f}")
     else:
         raise SystemExit("--calib is required with 2+ cameras")
@@ -543,13 +617,11 @@ def main():
     hand_cam_int = torch.tensor([Ks[args.hand_cam]], dtype=torch.float32)
     R_world_handcam = Rs[args.hand_cam].T          # cam→world (world = cam0 frame)
 
-    print("[3/4] Cameras + workers...")
+    print("[3/4] Cameras + workers (NLF warmup ~10 s)...")
     cams = [CamThread(i, args.cap_width, args.cap_height) for i in cam_idx]
     for c in cams:
         c.start()
-    body = BodyWorker(cams, Ks, Ds, Rs, Ts, args.det_thr, device="cuda",
-                      det_model=args.det_model, det_freq=args.det_freq,
-                      tracking=not args.no_tracking)
+    body = BodyWorker(cams, Ks, Ds, Rs, Ts, args.det_thr, args)
     body.start()
     hands = HandWorker(cams[args.hand_cam], body, est.model, hand_cam_int,
                        args, args.hand_cam)
@@ -593,8 +665,8 @@ def main():
             for i, c in enumerate(cams):
                 f, _, _ = c.latest()
                 img = f if f is not None else np.zeros((720, 1280, 3), np.uint8)
-                img = draw_body26(img.copy(), res["kp2d"][i], res["scores"][i],
-                                  args.det_thr)
+                img = draw_markers(img.copy(), res["kp2d"][i], res["scores"][i],
+                                   args.det_thr)
                 if i == args.hand_cam and hres is not None:
                     from body_hand_decoder_extractor import _draw_hand
                     if hres["kp_r"] is not None:
@@ -612,9 +684,9 @@ def main():
             t_prev = t_wall
             if dt and dt > 0:
                 ema = 1.0 / dt if ema is None else 0.85 * ema + 0.15 / dt
-            cv2.putText(overlays[0], f"COSMIK body26 + hand decoder  {ema or 0:4.1f} Hz",
+            cv2.putText(overlays[0], f"NLF markers + hand decoder  {ema or 0:4.1f} Hz",
                         (14, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 4, cv2.LINE_AA)
-            cv2.putText(overlays[0], f"COSMIK body26 + hand decoder  {ema or 0:4.1f} Hz",
+            cv2.putText(overlays[0], f"NLF markers + hand decoder  {ema or 0:4.1f} Hz",
                         (14, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
 
             viz.log(nb, t_wall, overlays, res["kp3d"], g70,
@@ -643,7 +715,7 @@ def main():
 
             if nb % 60 == 0:
                 cams_fps = " ".join(f"cam{i} {c.fps:.0f}" for i, c in enumerate(cams))
-                print(f"  body {ema or 0:4.1f} Hz  (rtm+tri {res['ms']:.0f} ms, "
+                print(f"  body {ema or 0:4.1f} Hz  (nlf+tri {res['ms']:.0f} ms, "
                       f"hands {hres['ms'] if hres else 0:.0f} ms, "
                       f"capture: {cams_fps} fps, "
                       f"sync spread {res['sync_ms']:.0f} ms)", flush=True)
@@ -654,8 +726,8 @@ def main():
         if vw is not None:
             vw.release()
         if rec is not None and rec["ts"]:
-            np.save(os.path.join(out_dir, "body26_3d.npy"), np.stack(rec["b3d"]))
-            np.save(os.path.join(out_dir, "body26_2d.npy"), np.stack(rec["b2d"]))
+            np.save(os.path.join(out_dir, "markers_3d.npy"), np.stack(rec["b3d"]))
+            np.save(os.path.join(out_dir, "markers_2d.npy"), np.stack(rec["b2d"]))
             np.save(os.path.join(out_dir, "hands_2d.npy"), np.stack(rec["h2d"]))
             np.save(os.path.join(out_dir, "goliath70_3d.npy"), np.stack(rec["g70"]))
             np.save(os.path.join(out_dir, "timestamps.npy"), np.asarray(rec["ts"]))
