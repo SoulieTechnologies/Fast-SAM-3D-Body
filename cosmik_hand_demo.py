@@ -333,7 +333,12 @@ class BodyWorker(threading.Thread):
                         f"camera frame is {f.shape[1]}x{f.shape[0]}, expected "
                         f"{W}x{H} (--cap-width/height must match the calib)")
             t0 = time.perf_counter()
-            out, tms, _, _ = self.est.estimate_from_frames(frames)
+            out, tms, _, boxes = self.est.estimate_from_frames(frames)
+            # locked person box per cam, xywh pixels (NaN when no detection)
+            pboxes = np.full((ncam, 4), np.nan, np.float32)
+            for i, b in enumerate(boxes):
+                if b is not None and len(b):
+                    pboxes[i] = b[0].detach().float().cpu().numpy()
             kp2d = np.full((ncam, NMK, 2), np.nan, np.float32)
             sc = np.zeros((ncam, NMK), np.float32)
             p2d_all = out["poses2d"]
@@ -360,6 +365,7 @@ class BodyWorker(threading.Thread):
             ms = (time.perf_counter() - t0) * 1e3
             with self._lock:
                 self.result = {"kp2d": kp2d, "scores": sc, "kp3d": kp3d,
+                               "boxes": pboxes,
                                "frames_ts": tss, "ms": ms,
                                "yolo_ms": tms.get("yolo_ms", 0.0),
                                "nlf_ms": tms.get("nlf_ms", 0.0),
@@ -673,6 +679,10 @@ def main():
                 img = f if f is not None else np.zeros((720, 1280, 3), np.uint8)
                 img = draw_markers(img.copy(), res["kp2d"][i], res["scores"][i],
                                    args.det_thr)
+                pb = res["boxes"][i]                     # locked YOLO person box
+                if np.isfinite(pb).all():
+                    x, y, w, h = pb.astype(int)
+                    cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 120), 2)
                 if i == args.hand_cam and hres is not None:
                     from body_hand_decoder_extractor import _draw_hand
                     if hres["kp_r"] is not None:
