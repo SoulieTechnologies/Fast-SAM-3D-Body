@@ -333,7 +333,7 @@ class BodyWorker(threading.Thread):
                         f"camera frame is {f.shape[1]}x{f.shape[0]}, expected "
                         f"{W}x{H} (--cap-width/height must match the calib)")
             t0 = time.perf_counter()
-            out, _, _, _ = self.est.estimate_from_frames(frames)
+            out, tms, _, _ = self.est.estimate_from_frames(frames)
             kp2d = np.full((ncam, NMK, 2), np.nan, np.float32)
             sc = np.zeros((ncam, NMK), np.float32)
             p2d_all = out["poses2d"]
@@ -361,6 +361,8 @@ class BodyWorker(threading.Thread):
             with self._lock:
                 self.result = {"kp2d": kp2d, "scores": sc, "kp3d": kp3d,
                                "frames_ts": tss, "ms": ms,
+                               "yolo_ms": tms.get("yolo_ms", 0.0),
+                               "nlf_ms": tms.get("nlf_ms", 0.0),
                                "sync_ms": (max(tss) - min(tss)) * 1e3}
                 self.n += 1
 
@@ -582,6 +584,10 @@ def main():
                         "TCP (for orca_teleop/retarget_mpc.py --listen)")
     args = p.parse_args()
 
+    # same speed flags as RT-COSMIK's run_pipeline.py
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
     cam_idx = [int(x) for x in args.cams.split(",")]
     ncam = len(cam_idx)
     if args.calib:
@@ -715,7 +721,8 @@ def main():
 
             if nb % 60 == 0:
                 cams_fps = " ".join(f"cam{i} {c.fps:.0f}" for i, c in enumerate(cams))
-                print(f"  body {ema or 0:4.1f} Hz  (nlf+tri {res['ms']:.0f} ms, "
+                print(f"  body {ema or 0:4.1f} Hz  (total {res['ms']:.0f} ms: "
+                      f"yolo {res['yolo_ms']:.0f} + nlf {res['nlf_ms']:.0f}, "
                       f"hands {hres['ms'] if hres else 0:.0f} ms, "
                       f"capture: {cams_fps} fps, "
                       f"sync spread {res['sync_ms']:.0f} ms)", flush=True)
