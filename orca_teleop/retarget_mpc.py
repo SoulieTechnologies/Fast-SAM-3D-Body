@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Orca-hand teleoperation retargeting — SAM3D hand keypoints → Orca joint angles
+"""Robot-hand teleoperation retargeting — SAM3D hand keypoints → joint angles
 via an acados MPC (sliding-horizon IK), visualised in VISER (web UI + sliders).
+Supports several hands via --hand (see HANDS: orca, sharpa).
 
 Input: 21 right-hand keypoints (SAM3D hand-decoder order, wrist-relative 3D):
     local idx  0..3   thumb  [tip, DIP, PIP, MCP]
@@ -9,14 +10,15 @@ Input: 21 right-hand keypoints (SAM3D hand-decoder order, wrist-relative 3D):
                12..15 ring            "
                16..19 pinky           "
                20     wrist
-The palm orientation is normalised per frame (human palm basis → Orca palm
+The palm orientation is normalised per frame (human palm basis → robot palm
 basis), so only finger ARTICULATION is retargeted. Targets are globally scaled
-to the Orca's finger lengths.
+to the robot's finger lengths.
 
-Fingertip frames: each Orca fingertip is the distal link origin + a LOCAL
-offset. The offsets are acados *parameters* — the viser sliders move them live
-(green spheres), no solver rebuild. Use the "print tip offsets" button to get
-CLI values once the green spheres sit exactly on the mesh fingertips.
+Fingertip frames: each fingertip is a tip frame origin + a LOCAL offset. The
+offsets are acados *parameters* — the viser sliders move them live (green
+spheres), no solver rebuild. Use the "print tip offsets" button to get CLI
+values once the green spheres sit exactly on the mesh fingertips. (The Sharpa
+URDF has real fingertip frames → offsets default to zero.)
 
 MPC: state x=[q,dq], control u=ddq, cost = Σ w·||FK−p||² + w_dq·||dq||² +
 w_u·||u||², hard joint limits. Weights: tips 50, mid-phalanges 2, MCP 0.1.
@@ -36,6 +38,7 @@ import socket
 import struct
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -44,30 +47,35 @@ import pinocchio as pin
 _HERE = Path(__file__).resolve().parent
 
 # ═══════════════════════════════════════════════════════════════════════════
-# HUMAN(21) ↔ ORCA FRAME MAPPING  (right hand)
+# HAND CONFIGS — human(21) ↔ robot frame mapping, per supported hand
 # ═══════════════════════════════════════════════════════════════════════════
-# Finger order across the Orca palm (from joint origins): chains are
-# AP (MCP) → PP (PIP) → FingerTipAssembly / T-DP (distal).
 
-_F = {
-    "thumb":  {"mcp": "R-T-AP_a9723101", "pip": "T-PP_68395e98",
-               "dist": "T-DP_b7429e50"},
-    "index":  {"mcp": "I-AP-R_d95d02d1", "pip": "I-PP_bacbd481",
-               "dist": "I-FingerTipAssembly_ec49c16c"},
-    "middle": {"mcp": "M-AP_e04a96f2", "pip": "M-PP_08efa608",
-               "dist": "M-FingerTipAssembly_34afb748"},
-    "ring":   {"mcp": "M-AP_6ec59111", "pip": "M-PP_8660a1eb",
-               "dist": "M-FingerTipAssembly_424a8e75"},
-    "pinky":  {"mcp": "P-AP_f5e42b61", "pip": "P-PP_1d411b9b",
-               "dist": "P-FingerTipAssembly_cd219176"},
-}
-FINGERS = ["thumb", "index", "middle", "ring", "pinky"]
+FINGERS = ["thumb", "index", "middle", "ring", "pinky"]      # human-side order
 _FINGER_BASE = {"thumb": 0, "index": 4, "middle": 8, "ring": 12, "pinky": 16}
-PALM_LINK = "R-Carpals_8d1f1041"
-WRIST_JOINT_HINT = "to_TopTower"
 
-# Tip offsets calibrated on the meshes with the viser sliders (2026-07-08) —
-# local distal-frame coordinates, metres.
+
+@dataclass(frozen=True)
+class HandConfig:
+    """Everything hand-specific: URDF, frame names, offsets, publish format.
+
+    frames[finger] = {"tip", "dist", "pip", "mcp"}: tip carries the local tip
+    offset (acados parameter); dist/pip/mcp are the static-tracking frames
+    matched to the human DIP/PIP/MCP keypoints. For hands without a dedicated
+    fingertip frame, tip == dist and the offset is slider-calibrated.
+    """
+    name: str
+    urdf: str
+    frames: dict
+    palm_link: str
+    wrist_joint_hint: str          # joint-name substring to lock ("" = none)
+    tip_offsets: dict              # finger → (3,) local offset in the TIP frame
+    default_topic: str
+    publish_order: tuple = ()      # URDF joint names in the driver's index order
+    publish_names: tuple = ()      # JointState names (defaults to publish_order)
+
+
+# ── Orca (v1 right): CAD-hash names, chains AP (MCP) → PP (PIP) → distal ────
+# Tip offsets calibrated on the meshes with the viser sliders (2026-07-08).
 TIP_OFFSETS_CALIB = {
     "thumb":  np.array([0.0009, 0.0000, 0.0270]),
     "index":  np.array([-0.0085, -0.0000, 0.0400]),
@@ -76,31 +84,99 @@ TIP_OFFSETS_CALIB = {
     "pinky":  np.array([-0.0085, 0.0000, 0.0330]),
 }
 
+def _orca_frames():
+    f = {
+        "thumb":  {"mcp": "R-T-AP_a9723101", "pip": "T-PP_68395e98",
+                   "dist": "T-DP_b7429e50"},
+        "index":  {"mcp": "I-AP-R_d95d02d1", "pip": "I-PP_bacbd481",
+                   "dist": "I-FingerTipAssembly_ec49c16c"},
+        "middle": {"mcp": "M-AP_e04a96f2", "pip": "M-PP_08efa608",
+                   "dist": "M-FingerTipAssembly_34afb748"},
+        "ring":   {"mcp": "M-AP_6ec59111", "pip": "M-PP_8660a1eb",
+                   "dist": "M-FingerTipAssembly_424a8e75"},
+        "pinky":  {"mcp": "P-AP_f5e42b61", "pip": "P-PP_1d411b9b",
+                   "dist": "P-FingerTipAssembly_cd219176"},
+    }
+    for d in f.values():
+        d["tip"] = d["dist"]                       # no fingertip frame in URDF
+    return f
 
-def tip_directions(model):
-    """Unit PIP→distal direction expressed in each DISTAL LOCAL frame, at
+
+# ── Sharpa Wave (right): human-readable names, real fingertip frames ────────
+# Link chain per finger: PP (origin=MCP) → MP (PIP) → DP (DIP) → fingertip;
+# thumb: MC (CMC) → PP (MCP) → DP (IP) → fingertip.
+def _sharpa_frames():
+    f = {}
+    for fg in ("index", "middle", "ring", "pinky"):
+        f[fg] = {"mcp": f"right_{fg}_PP", "pip": f"right_{fg}_MP",
+                 "dist": f"right_{fg}_DP", "tip": f"right_{fg}_fingertip"}
+    f["thumb"] = {"mcp": "right_thumb_MC", "pip": "right_thumb_PP",
+                  "dist": "right_thumb_DP", "tip": "right_thumb_fingertip"}
+    return f
+
+
+# SDK joint order (indices 0..21 of SharpaWave.set_joint_position) expressed
+# in URDF joint names; names below are the SDK ROS bridge's JOINT_NAMES.
+_SHARPA_ORDER = tuple(
+    [f"right_thumb_{j}" for j in ("CMC_FE", "CMC_AA", "MCP_FE", "MCP_AA", "IP")]
+    + [f"right_{fg}_{j}" for fg in ("index", "middle", "ring")
+       for j in ("MCP_FE", "MCP_AA", "PIP", "DIP")]
+    + [f"right_pinky_{j}" for j in ("CMC", "MCP_FE", "MCP_AA", "PIP", "DIP")])
+_SHARPA_NAMES = tuple(
+    ["thumb_CMC_FE", "thumb_CMC_AA", "thumb_MCP_FE", "thumb_MCP_AA", "thumb_DIP"]
+    + [f"{fg}_{j}" for fg in ("index", "middle", "ring")
+       for j in ("MCP_FE", "MCP_AA", "PIP", "DIP")]
+    + ["pinky_CMC_FE", "pinky_MCP_FE", "pinky_MCP_AA", "pinky_PIP", "pinky_DIP"])
+
+HANDS = {
+    "orca": HandConfig(
+        name="orca",
+        urdf=str(_HERE / "orcahand" / "orcahand_right.urdf"),
+        frames=_orca_frames(),
+        palm_link="R-Carpals_8d1f1041",
+        wrist_joint_hint="to_TopTower",
+        tip_offsets=TIP_OFFSETS_CALIB,
+        default_topic="/orca/joint_states_target",
+    ),
+    "sharpa": HandConfig(
+        name="sharpa",
+        urdf=str(_HERE / "sharpawave" / "right_sharpa_wave.urdf"),
+        frames=_sharpa_frames(),
+        palm_link="right_hand_C_MC",
+        wrist_joint_hint="",                       # hand-only URDF, no wrist
+        tip_offsets={f: np.zeros(3) for f in FINGERS},
+        default_topic="wave/right/joint_commands",  # SDK's wave_ros_server.py
+        publish_order=_SHARPA_ORDER,
+        publish_names=_SHARPA_NAMES,
+    ),
+}
+
+
+def tip_directions(cfg, model):
+    """Unit PIP→distal direction expressed in each TIP LOCAL frame, at
     neutral pose — the axis the default tip offset extends along."""
     data = model.createData()
     pin.forwardKinematics(model, data, pin.neutral(model))
     pin.updateFramePlacements(model, data)
     dirs = {}
     for f in FINGERS:
-        M_d = data.oMf[model.getFrameId(_F[f]["dist"])]
-        p_p = data.oMf[model.getFrameId(_F[f]["pip"])].translation
-        u = M_d.translation - p_p
+        M_t = data.oMf[model.getFrameId(cfg.frames[f]["tip"])]
+        p_d = data.oMf[model.getFrameId(cfg.frames[f]["dist"])].translation
+        p_p = data.oMf[model.getFrameId(cfg.frames[f]["pip"])].translation
+        u = p_d - p_p
         u = u / (np.linalg.norm(u) + 1e-12)
-        dirs[f] = M_d.rotation.T @ u
+        dirs[f] = M_t.rotation.T @ u
     return dirs
 
 
 # static (non-tip) tracked frames: (frame name, human local idx, weight)
-def build_static_tracking(mid_weight, mcp_weight):
+def build_static_tracking(cfg, mid_weight, mcp_weight):
     track = []
     for f in FINGERS:
         b = _FINGER_BASE[f]
-        track.append((_F[f]["dist"], b + 1, mid_weight))
-        track.append((_F[f]["pip"], b + 2, mid_weight))
-        track.append((_F[f]["mcp"], b + 3, mcp_weight))
+        track.append((cfg.frames[f]["dist"], b + 1, mid_weight))
+        track.append((cfg.frames[f]["pip"], b + 2, mid_weight))
+        track.append((cfg.frames[f]["mcp"], b + 3, mcp_weight))
     return track
 
 
@@ -116,19 +192,21 @@ def _basis(fwd, lat):
 
 
 class PalmMapper:
-    """Maps wrist-relative human keypoints into Orca palm-frame 3D targets."""
+    """Maps wrist-relative human keypoints into robot palm-frame 3D targets."""
 
-    def __init__(self, model, tip_offset, scale_frames=15):
+    def __init__(self, cfg, model, tip_offset, scale_frames=15):
         data = model.createData()
         pin.forwardKinematics(model, data, pin.neutral(model))
         pin.updateFramePlacements(model, data)
         P = lambda n: data.oMf[model.getFrameId(n)].translation.copy()
-        self.palm = P(PALM_LINK)
-        self.R_orca = _basis(P(_F["middle"]["mcp"]) - self.palm,
-                             P(_F["pinky"]["mcp"]) - P(_F["index"]["mcp"]))
-        self.orca_len = (np.linalg.norm(P(_F["middle"]["mcp"]) - self.palm)
-                         + np.linalg.norm(P(_F["middle"]["pip"]) - P(_F["middle"]["mcp"]))
-                         + np.linalg.norm(P(_F["middle"]["dist"]) - P(_F["middle"]["pip"]))
+        F = cfg.frames
+        self.palm = P(cfg.palm_link)
+        self.R_orca = _basis(P(F["middle"]["mcp"]) - self.palm,
+                             P(F["pinky"]["mcp"]) - P(F["index"]["mcp"]))
+        self.orca_len = (np.linalg.norm(P(F["middle"]["mcp"]) - self.palm)
+                         + np.linalg.norm(P(F["middle"]["pip"]) - P(F["middle"]["mcp"]))
+                         + np.linalg.norm(P(F["middle"]["dist"]) - P(F["middle"]["pip"]))
+                         + np.linalg.norm(P(F["middle"]["tip"]) - P(F["middle"]["dist"]))
                          + tip_offset)
         self.scale = None
         self._scale_buf = []
@@ -167,7 +245,7 @@ class PalmMapper:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class HandMPC:
-    def __init__(self, model, static_track, w_tip, N=8, dt=0.04,
+    def __init__(self, cfg, model, static_track, w_tip, N=8, dt=0.04,
                  w_dq=1e-3, w_u=1e-4):
         import casadi
         import pinocchio.casadi as cpin
@@ -193,14 +271,14 @@ class HandMPC:
         p_off = casadi.SX.sym("p_off", 3 * self.n_tips)
         exprs = []
         for i, f in enumerate(FINGERS):
-            M = cdata.oMf[cmodel.getFrameId(_F[f]["dist"])]
+            M = cdata.oMf[cmodel.getFrameId(cfg.frames[f]["tip"])]
             exprs.append(M.translation + M.rotation @ p_off[3 * i:3 * i + 3])
         for n, _, _ in static_track:
             exprs.append(cdata.oMf[cmodel.getFrameId(n)].translation)
         markers = casadi.vertcat(*exprs)
 
         am = AcadosModel()
-        am.name = "orca_hand_mpc"
+        am.name = f"{cfg.name}_hand_mpc"      # per-hand acados codegen dir
         am.x, am.u = cx, cu
         am.disc_dyn_expr = x_next
         am.cost_y_expr = casadi.vertcat(markers, cdq, cu)
@@ -280,13 +358,14 @@ class HandMPC:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class ViserViz:
-    def __init__(self, urdf_path, model, offsets, port=8080):
+    def __init__(self, cfg, urdf_path, model, offsets, port=8080):
         import viser
         from viser.extras import ViserUrdf
+        self.cfg = cfg
         self.model = model
         self.offsets = offsets                 # dict finger → (3,) LOCAL offset (shared, live)
         self.server = viser.ViserServer(port=port)
-        self.vurdf = ViserUrdf(self.server, Path(urdf_path), root_node_name="/orca")
+        self.vurdf = ViserUrdf(self.server, Path(urdf_path), root_node_name="/hand")
 
         # pinocchio q ↔ yourdfpy configuration mapping (by joint name; the
         # locked wrist is absent from the reduced model → stays at 0)
@@ -338,7 +417,7 @@ class ViserViz:
 
     def update_spheres(self, data, tip_targets):
         for i, f in enumerate(FINGERS):
-            M = data.oMf[self.model.getFrameId(_F[f]["dist"])]
+            M = data.oMf[self.model.getFrameId(self.cfg.frames[f]["tip"])]
             self.green[f].position = M.translation + M.rotation @ self.offsets[f]
             if np.isfinite(tip_targets[i]).all():
                 self.red[f].position = tip_targets[i]
@@ -389,11 +468,12 @@ def replay_frames(path, hand="right"):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
-    p = argparse.ArgumentParser(description="SAM3D hand → Orca hand MPC retargeting (viser)")
+    p = argparse.ArgumentParser(description="SAM3D hand → robot hand MPC retargeting (viser)")
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--replay", help="goliath70_3d.npy from cosmik_hand_demo")
     src.add_argument("--listen", help="host:port of cosmik_hand_demo --emit-hand-port")
-    p.add_argument("--urdf", default=str(_HERE / "orcahand" / "orcahand_right.urdf"))
+    p.add_argument("--hand", choices=sorted(HANDS), default="orca")
+    p.add_argument("--urdf", default="", help="override the hand config's URDF")
     p.add_argument("--N", type=int, default=8)
     p.add_argument("--dt", type=float, default=0.04)
     p.add_argument("--w-tip", type=float, default=50.0)
@@ -411,27 +491,29 @@ def main():
     p.add_argument("--replay-fps", type=float, default=25.0)
     p.add_argument("--save-q", default="", help="save the joint trajectory to CSV")
     args = p.parse_args()
+    cfg = HANDS[args.hand]
+    urdf = args.urdf or cfg.urdf
 
-    print("[1/4] Model...")
-    model, coll, vis = pin.buildModelsFromUrdf(args.urdf, str(Path(args.urdf).parent))
-    if not args.free_wrist:
-        wrist = [model.getJointId(n) for n in model.names if WRIST_JOINT_HINT in n]
+    print(f"[1/4] Model ({cfg.name})...")
+    model, coll, vis = pin.buildModelsFromUrdf(urdf, str(Path(urdf).parent))
+    if not args.free_wrist and cfg.wrist_joint_hint:
+        wrist = [model.getJointId(n) for n in model.names if cfg.wrist_joint_hint in n]
         if wrist:
             model, (coll, vis) = pin.buildReducedModel(
                 model, [coll, vis], wrist, pin.neutral(model))
             print(f"  wrist locked → nq={model.nq}")
     if args.tip_offset is None and args.tip_offset_thumb is None:
-        offsets = {f: TIP_OFFSETS_CALIB[f].copy() for f in FINGERS}
+        offsets = {f: cfg.tip_offsets[f].copy() for f in FINGERS}
     else:
-        dirs = tip_directions(model)
+        dirs = tip_directions(cfg, model)
         mag_f = args.tip_offset if args.tip_offset is not None else 0.033
         mag_t = args.tip_offset_thumb if args.tip_offset_thumb is not None else 0.028
         offsets = {f: (mag_t if f == "thumb" else mag_f) * dirs[f] for f in FINGERS}
-    static_track = build_static_tracking(args.w_mid, args.w_mcp)
-    mapper = PalmMapper(model, float(np.linalg.norm(offsets["middle"])))
+    static_track = build_static_tracking(cfg, args.w_mid, args.w_mcp)
+    mapper = PalmMapper(cfg, model, float(np.linalg.norm(offsets["middle"])))
 
     print("[2/4] Viser...")
-    viz = ViserViz(args.urdf, model, offsets, port=args.viser_port)
+    viz = ViserViz(cfg, urdf, model, offsets, port=args.viser_port)
     data = model.createData()
     q = pin.neutral(model)
     viz.set_q(q)
@@ -440,7 +522,7 @@ def main():
     viz.update_spheres(data, np.full((5, 3), np.nan))
 
     print("[3/4] Building acados MPC (~1 min first time)...")
-    mpc = HandMPC(model, static_track, args.w_tip, N=args.N, dt=args.dt,
+    mpc = HandMPC(cfg, model, static_track, args.w_tip, N=args.N, dt=args.dt,
                   w_dq=args.w_dq, w_u=args.w_u)
     mpc.warm_start(q)
 
@@ -489,7 +571,7 @@ def main():
                 per = []
                 for i, f in enumerate(FINGERS):
                     if np.isfinite(tip_targets[i]).all():
-                        M = data.oMf[model.getFrameId(_F[f]["dist"])]
+                        M = data.oMf[model.getFrameId(cfg.frames[f]["tip"])]
                         tip = M.translation + M.rotation @ offsets[f]
                         per.append((f, np.linalg.norm(tip - tip_targets[i])))
                 detail = "  ".join(f"{f} {1e3*e:.0f}" for f, e in per)

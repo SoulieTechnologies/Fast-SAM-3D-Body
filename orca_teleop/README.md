@@ -1,17 +1,26 @@
-# Orca hand teleop
+# Robot-hand teleop (Orca / Sharpa Wave)
 
-Retarget SAM3D hand keypoints onto the Orca robotic hand with an ACADOS MPC.
+Retarget SAM3D hand keypoints onto a robot hand with an ACADOS MPC. The hand
+is selected with `--hand {orca,sharpa}` (see `HANDS` in `retarget_mpc.py` —
+URDF, frame names, tip offsets, driver topic and joint order per hand).
 
 ```
 cosmik_hand_demo.py  --emit-hand-port 8092         (perception, in repo root)
     │  TCP: [>I frame][21×3 float32]  = 256 B, wrist-relative right-hand keypoints
     ▼
 retarget_mpc.py / hand_teleop_node.py              (acados env)
-    palm alignment + human→Orca scale  →  fingertip MPC  →  JointState (rad, URDF names)
-    │  ROS 2: /orca/joint_states_target
-    ▼
-orca_hand_driver_node.py                           (orca_core env)
-    joint map (URDF→orca names, rad→deg, sign/offset)  →  vel clamp  →  OrcaHand.set_joint_pos
+    palm alignment + human→robot scale  →  fingertip MPC  →  JointState
+    │
+    ├─ --hand orca  → /orca/joint_states_target (rad, URDF names)
+    │       ▼
+    │  orca_hand_driver_node.py                    (orca_core env)
+    │      joint map yaml (URDF→orca names, rad→deg, sign/offset)
+    │      → vel clamp → OrcaHand.set_joint_pos
+    │
+    └─ --hand sharpa → wave/right/joint_commands (rad, SDK 22-joint order)
+            ▼
+       Sharpa SDK's own ROS 2 bridge (/opt/sharpa-wave-sdk/sample/ROS/
+       wave_ros_server.py) — no custom driver needed
 ```
 
 ## Files
@@ -23,6 +32,7 @@ orca_hand_driver_node.py                           (orca_core env)
 | `orca_hand_driver_node.py` | **ROS 2 driver** for the physical hand: subscribes the JointState, maps URDF→`orca_core` joints via the yaml, velocity-clamps, writes `OrcaHand.set_joint_pos()`. Needs only `rclpy` + `orca_core` (no acados). `--dry` for hardware-less testing. |
 | `joint_map_v1_right.yaml` | URDF CAD-hash names → `orca_core` names, with per-joint `sign` / `offset_deg` (⚠ abduction signs unverified — see bring-up). |
 | `orcahand/` | Vendored URDF + STL meshes (right hand, 17 revolute joints; the `to_TopTower` wrist joint is locked → nq=16). |
+| `sharpawave/` | Vendored Sharpa Wave right-hand URDF + meshes (from sharpa-robotics/sharpa-urdf-usd-xml, `package://` paths rewritten relative; 22 revolute joints, real `*_fingertip` frames → tip offsets default to 0). |
 
 ## Run
 
@@ -82,3 +92,28 @@ targets stale > `--idle` → ramp to config neutral, shutdown → torque off.
    ```
    Keep a hand on the e-stop / USB cable for the first run; raise `--vmax-deg`
    (default 200) once the motion looks right.
+
+## Driving the Sharpa Wave
+
+The Wave SDK (install `sharpa-wave-sdk_<v>_amd64.deb` from
+github.com/sharpa-robotics/sharpa-wave-sdk/releases → `/opt/sharpa-wave-sdk/`)
+ships its own ROS 2 bridge, so there is no custom driver:
+
+```bash
+# ① its bridge (system python 3.10 + ROS 2 sourced; needs cv_bridge):
+python3 /opt/sharpa-wave-sdk/sample/ROS/wave_ros_server.py
+# ② our teleop node (acados env + ROS 2 sourced):
+python hand_teleop_node.py --listen localhost:8092 --hand sharpa
+```
+
+Notes:
+- The bridge indexes `msg.position` BY POSITION (ignores names) — the node
+  reorders q into the SDK's 22-joint order via `publish_order` in the config.
+- No calibration step: the SDK works in radians with the URDF conventions,
+  and `pin.neutral` = all-zeros matches the SDK sample's init pose.
+- The bridge does not set speed/current coefficients; run the SDK python
+  sample once (or Sharpa Pilot) if you want `set_speed_coeff`/`set_current_coeff`
+  limits configured, and start the first session with a LOW `--vmax` (e.g. 1.0).
+- First tip-offset pass should be unnecessary (real fingertip frames), but the
+  viser sliders (`retarget_mpc.py --hand sharpa --replay ...`) still work if
+  the tips need a tweak.

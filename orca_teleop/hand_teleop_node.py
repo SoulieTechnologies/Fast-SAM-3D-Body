@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""ROS 2 hand-teleop node for the REAL Orca hand — adapted from the nero_touch
-safety-filter node design (virtual MPC state, hold-last on solver failure,
-staleness watchdog), with the hand-retargeting MPC of retarget_mpc.py inside.
+"""ROS 2 hand-teleop node for a REAL robot hand (--hand orca|sharpa) — adapted
+from the nero_touch safety-filter node design (virtual MPC state, hold-last on
+solver failure, staleness watchdog), with the retarget_mpc.py MPC inside.
 
     SAM3D hand keypoints (TCP, from cosmik_hand_demo --emit-hand-port 8092)
         → palm alignment + scale → fingertip MPC (acados)
-        → velocity-clamped JointState on --topic (default /orca/joint_states_target)
+        → velocity-clamped JointState on --topic (default: per-hand driver topic
+          — orca: /orca/joint_states_target → orca_hand_driver_node.py;
+            sharpa: wave/right/joint_commands → the SDK's wave_ros_server.py,
+            positions reordered into the SDK's 22-joint index order)
 
 Safety layers (in order):
   - startup ramp: output velocity-clamps from NEUTRAL toward the first target,
@@ -45,7 +48,7 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))  # retarget_mpc lives next to this file — make it importable from any cwd (ros2 run, launch files)
 
 # Reuse the proven retargeting blocks — nothing re-implemented here.
-from retarget_mpc import (FINGERS, TIP_OFFSETS_CALIB, WRIST_JOINT_HINT, _RX,  # noqa: E402
+from retarget_mpc import (FINGERS, HANDS, _RX,  # noqa: E402
                           HandMPC, PalmMapper,
                           build_static_tracking, _FINGER_BASE)
 
@@ -54,19 +57,24 @@ class HandTeleop:
     """MPC retargeting core + safety layers; ROS publishing is pluggable."""
 
     def __init__(self, args):
-        print("[1/2] Model + mapper...")
-        model, _, _ = pin.buildModelsFromUrdf(args.urdf, str(Path(args.urdf).parent))
-        wrist = [model.getJointId(n) for n in model.names if WRIST_JOINT_HINT in n]
-        if wrist:
-            model = pin.buildReducedModel(model, wrist, pin.neutral(model))
+        cfg = HANDS[args.hand]
+        urdf = args.urdf or cfg.urdf
+        print(f"[1/2] Model ({cfg.name}) + mapper...")
+        model, _, _ = pin.buildModelsFromUrdf(urdf, str(Path(urdf).parent))
+        if cfg.wrist_joint_hint:
+            wrist = [model.getJointId(n) for n in model.names
+                     if cfg.wrist_joint_hint in n]
+            if wrist:
+                model = pin.buildReducedModel(model, wrist, pin.neutral(model))
         self.model = model
-        self.offsets = {f: TIP_OFFSETS_CALIB[f].copy() for f in FINGERS}
+        self.offsets = {f: cfg.tip_offsets[f].copy() for f in FINGERS}
         self.offsets_flat = np.concatenate([self.offsets[f] for f in FINGERS])
-        self.static_track = build_static_tracking(args.w_mid, args.w_mcp)
-        self.mapper = PalmMapper(model, float(np.linalg.norm(self.offsets["middle"])))
+        self.static_track = build_static_tracking(cfg, args.w_mid, args.w_mcp)
+        self.mapper = PalmMapper(cfg, model,
+                                 float(np.linalg.norm(self.offsets["middle"])))
 
         print("[2/2] Building acados MPC (~1 min first time)...")
-        self.mpc = HandMPC(model, self.static_track, args.w_tip,
+        self.mpc = HandMPC(cfg, model, self.static_track, args.w_tip,
                            N=args.N, dt=args.dt, w_dq=args.w_dq, w_u=args.w_u)
         self.q_neutral = pin.neutral(model)
         self.mpc.warm_start(self.q_neutral)
@@ -75,11 +83,23 @@ class HandTeleop:
         self.q_pub = self.q_neutral.copy()      # last PUBLISHED (vel-clamped) command
         self.last_kp_t = 0.0
         self._was_tracking = False              # were we tracking on the previous tick?
-        self.joint_names = list(model.names[1:])
+        # publish format: some drivers (sharpa's wave_ros_server) index by
+        # POSITION, so reorder q into the driver's joint order when configured
+        if cfg.publish_order:
+            self.pub_idx = [model.joints[model.getJointId(n)].idx_q
+                            for n in cfg.publish_order]
+            self.joint_names = list(cfg.publish_names or cfg.publish_order)
+        else:
+            self.pub_idx = None                 # publish in pinocchio/URDF order
+            self.joint_names = list(model.names[1:])
         if args.joint_map:
             import yaml
             m = yaml.safe_load(Path(args.joint_map).read_text())
             self.joint_names = [m.get(n, n) for n in self.joint_names]
+
+    def q_out(self, q):
+        """Command vector in the published joint order."""
+        return q[self.pub_idx] if self.pub_idx is not None else q
 
     def step(self, now):
         """One control tick → (q_command, status_str). Never raises."""
@@ -146,7 +166,7 @@ def run_ros(core, args):
             msg = JointState()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.name = core.joint_names
-            msg.position = q.tolist()
+            msg.position = core.q_out(q).tolist()
             self.pub.publish(msg)
             if status != self._last_status:
                 self.get_logger().info(f"state: {status}")
@@ -174,8 +194,10 @@ def main():
     p = argparse.ArgumentParser(description="Orca hand teleop ROS 2 node (MPC retargeting)")
     p.add_argument("--listen", default="localhost:8092",
                    help="host:port of cosmik_hand_demo --emit-hand-port")
-    p.add_argument("--urdf", default=str(_HERE / "orcahand" / "orcahand_right.urdf"))
-    p.add_argument("--topic", default="/orca/joint_states_target")
+    p.add_argument("--hand", choices=sorted(HANDS), default="orca")
+    p.add_argument("--urdf", default="", help="override the hand config's URDF")
+    p.add_argument("--topic", default="",
+                   help="publish topic (default: the hand config's driver topic)")
     p.add_argument("--joint-map", default="",
                    help="yaml {urdf_joint_name: driver_joint_name} for the real hand")
     p.add_argument("--dt", type=float, default=0.04)
@@ -193,6 +215,8 @@ def main():
                    help="drift back to neutral when keypoints are older than this (s)")
     p.add_argument("--no-ros", action="store_true", help="dry run without rclpy")
     args = p.parse_args()
+    if not args.topic:
+        args.topic = HANDS[args.hand].default_topic
 
     core = HandTeleop(args)
 
