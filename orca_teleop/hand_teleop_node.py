@@ -36,6 +36,8 @@ Dry-run without ROS (prints instead of publishing):
   python hand_teleop_node.py --listen localhost:8092 --no-ros
 """
 import argparse
+import socket
+import struct
 import sys
 import threading
 import time
@@ -101,6 +103,40 @@ class HandTeleop:
         """Command vector in the published joint order."""
         return q[self.pub_idx] if self.pub_idx is not None else q
 
+    def emit(self, q):
+        """Mirror the command over TCP (--emit-q) — write buf BEFORE n so a
+        fresh n is always paired with its matching q (same rule as _rx)."""
+        _EMITQ["buf"] = self.q_out(q).astype(np.float32).tobytes()
+        _EMITQ["n"] += 1
+
+
+# ── optional TCP re-emit of the published command (--emit-q) ─────────────────
+# Same [>I frame][n×float32] framing as the keypoint stream. Lets a driver in
+# a DIFFERENT python env (e.g. sharpa_tcp_driver.py on the system python with
+# the Wave SDK) consume the commands without sharing rclpy with the acados env.
+
+_EMITQ = {"buf": b"", "n": 0}
+
+
+def _emitq_server(port):
+    srv = socket.create_server(("0.0.0.0", port))
+    print(f"emitting q on tcp :{port}")
+    while True:
+        conn, _ = srv.accept()
+        threading.Thread(target=_emitq_client, args=(conn,), daemon=True).start()
+
+
+def _emitq_client(conn):
+    last = -1
+    try:
+        while True:
+            if _EMITQ["n"] != last and _EMITQ["buf"]:
+                last = _EMITQ["n"]
+                conn.sendall(struct.pack(">I", last) + _EMITQ["buf"])
+            time.sleep(0.004)
+    except OSError:
+        conn.close()
+
     def step(self, now):
         """One control tick → (q_command, status_str). Never raises."""
         a = self.args
@@ -163,6 +199,7 @@ def run_ros(core, args):
 
         def tick(self):
             q, status = core.step(time.time())
+            core.emit(q)
             msg = JointState()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.name = core.joint_names
@@ -178,12 +215,14 @@ def run_ros(core, args):
 
 
 def run_dry(core, args):
-    """No-ROS dry run: same loop, prints a heartbeat instead of publishing."""
-    print(f"DRY RUN — would publish on {args.topic} at {1/args.dt:.0f} Hz")
+    """No-ROS loop: prints a heartbeat; still emits over --emit-q if set."""
+    print(f"NO-ROS — {'emitting q over tcp' if args.emit_q else 'dry run'} "
+          f"at {1/args.dt:.0f} Hz (topic {args.topic} unused)")
     n = 0
     while True:
         t0 = time.time()
         q, status = core.step(t0)
+        core.emit(q)
         n += 1
         if n % 25 == 0:
             print(f"  [{status}] q[:4]={np.round(q[:4], 2).tolist()}", flush=True)
@@ -213,12 +252,19 @@ def main():
                    help="hold the last command when keypoints are older than this (s)")
     p.add_argument("--release", type=float, default=3.0,
                    help="drift back to neutral when keypoints are older than this (s)")
-    p.add_argument("--no-ros", action="store_true", help="dry run without rclpy")
+    p.add_argument("--no-ros", action="store_true", help="run without rclpy")
+    p.add_argument("--emit-q", type=int, default=0,
+                   help="if >0: also stream the published command over TCP on "
+                        "this port ([>I frame][n×float32], publish joint order) "
+                        "— lets sharpa_tcp_driver.py run without ROS")
     args = p.parse_args()
     if not args.topic:
         args.topic = HANDS[args.hand].default_topic
 
     core = HandTeleop(args)
+    if args.emit_q:
+        threading.Thread(target=_emitq_server, args=(args.emit_q,),
+                         daemon=True).start()
 
     host, port = args.listen.rsplit(":", 1)
     rx = threading.Thread(target=_rx_wrapper, args=(host, int(port), core), daemon=True)
