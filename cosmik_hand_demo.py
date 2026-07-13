@@ -13,11 +13,12 @@ pipeline later.
 Architecture (decoupled rates — the body never waits for the hands):
   capture thread per camera  → latest frame + timestamp (soft sync)
   body worker                → YOLO + NLF per view (batched) → triangulate 43×3 metric
-  hand worker                → SAM hand decoder on EVERY view's wrist crops →
-                               hand keypoints STEREO-triangulated across views
+  hand worker                → SAM hand decoder on EVERY view's wrist crops,
+                               all views in ONE batched forward → hand
+                               keypoints STEREO-triangulated across views
                                (metric scale, occlusion-robust; per-joint
                                epipolar check, mono fallback; --mono-hands =
-                               old hand-cam-only behaviour, ~2x faster)
+                               old hand-cam-only behaviour)
   main loop      (body rate) → fuse (stereo hands, else fingers re-anchored at
                                the metric wrists), Rerun logging, recording
 
@@ -65,9 +66,11 @@ import numpy as np
 import torch
 from notebook.utils import setup_sam_3d_body
 
-# Reuse the proven hand-decoder step (elbow→wrist crops, batched, un-flipped)
-# from the Rerun demo — nothing is modified there.
-from rerun_demo import _H_WRIST, _hand_decoder_step
+# Reuse the proven hand-decoder building blocks (elbow→wrist crops, batched,
+# un-flipped) from the Rerun demo — nothing is modified there.
+from rerun_demo import (_H_WRIST, _hand_box_v2, _quiet, HAND_SRC,
+                        L_ELBOW, L_WRIST, R_ELBOW, R_WRIST)
+from sam_3d_body.models.meta_arch.sam3d_body import _prepare_hand_batches_gpu
 
 # ═══════════════════════════════════════════════════════════════════════════
 # NLF ANATOMICAL MARKERS — names, SMPL-X vertex ids, skeleton, Goliath-70 map
@@ -136,7 +139,7 @@ def _pair_mid(kp, a, b):
     return kp[a] if fa else (kp[b] if fb else np.full(kp.shape[-1], np.nan, kp.dtype))
 
 
-# COCO-17 synthesis for the hand-crop guide (_hand_decoder_step) —
+# COCO-17 synthesis for the hand-crop guide (_hand_decoder_step_views) —
 # (coco_idx, marker or (lateral, medial) pair)
 _COCO17_FROM_MARKERS = [
     (0, "Nose"), (1, "LEye"), (2, "REye"), (3, "LEar"), (4, "REar"),
@@ -409,14 +412,73 @@ class BodyWorker(threading.Thread):
             return self.result, self.n
 
 
+def _hand_decoder_step_views(model, frames, k17s, cam_ints, args):
+    """rerun_demo._hand_decoder_step batched over views: ONE decoder forward.
+
+    frames / k17s / cam_ints: dicts view → frame_bgr / (17,2) COCO pixels /
+    (1,3,3) torch K. Views are stacked on the BATCH dim — NOT on the person
+    dim like model._merge_hand_batches — because cam_int is one per batch
+    entry (expanded to persons in the hand path): each view keeps its own
+    intrinsics. Flattened person order is then [v0-L, v0-R, v1-L, v1-R, ...].
+
+    Returns {view: (kp_r21_2d, kp_l21_2d, k3_r21, k3_l21, rbox, lbox)}, per
+    view identical to _hand_decoder_step (3D in that view's camera coords,
+    left hand un-mirrored, NOT anchored); a view with a missing hand box gets
+    all-None keypoints. With a single view this computes exactly what
+    _hand_decoder_step does.
+    """
+    out_hw = ((args.hand_res, args.hand_res) if args.hand_res > 0
+              else (model.cfg.MODEL.IMAGE_SIZE[1], model.cfg.MODEL.IMAGE_SIZE[0]))
+    per, prep = {}, {}
+    with torch.no_grad(), _quiet():
+        for v, frame in frames.items():
+            rbox = _hand_box_v2(k17s[v], R_WRIST, R_ELBOW, args)
+            lbox = _hand_box_v2(k17s[v], L_WRIST, L_ELBOW, args)
+            per[v] = (None, None, None, None, rbox, lbox)
+            if rbox is None or lbox is None:
+                continue
+            bl, br, _ = _prepare_hand_batches_gpu(
+                cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), lbox[None], rbox[None],
+                cam_ints[v], output_size=out_hw, padding=0.9, device="cuda")
+            prep[v] = (bl, br, rbox, lbox)
+        if not prep:
+            return per
+        views = list(prep)
+        bh = {k: torch.cat([torch.cat([prep[v][0][k], prep[v][1][k]], dim=1)
+                            for v in views], dim=0)
+              for k in ("img", "img_size", "ori_img_size", "bbox_center",
+                        "bbox_scale", "bbox", "affine_trans", "mask",
+                        "mask_score", "person_valid")}
+        bh["cam_int"] = torch.cat([prep[v][0]["cam_int"] for v in views], dim=0)
+        model._initialize_batch(bh)
+        merged = model.forward_step(bh, decoder_type="hand")
+    mhr = merged["mhr_hand"]
+    p2d = mhr["pred_keypoints_2d"].detach().float().cpu().numpy()
+    p3d = mhr.get("pred_keypoints_3d")
+    if p3d is not None:
+        p3d = p3d.detach().float().cpu().numpy()
+    for i, v in enumerate(views):
+        kp_l = p2d[2 * i][HAND_SRC].copy()
+        kp_l[:, 0] = frames[v].shape[1] - kp_l[:, 0] - 1     # un-flip left hand
+        kp_r = p2d[2 * i + 1][HAND_SRC]
+        k3r = k3l = None
+        if p3d is not None:
+            k3r = p3d[2 * i + 1][HAND_SRC]
+            k3l = p3d[2 * i][HAND_SRC].copy()
+            k3l[:, 0] *= -1                                  # un-flip left hand
+        per[v] = (kp_r, kp_l, k3r, k3l, prep[v][2], prep[v][3])
+    return per
+
+
 class HandWorker(threading.Thread):
     """SAM hand decoder guided by the NLF wrists — stereo across the views.
 
-    Runs the decoder on every view in `views` (sequential GPU calls) and
-    triangulates the 21 keypoints of each hand across the views, exactly like
-    the body markers: metric scale and robustness when one view loses the
-    hand (per-joint epipolar rejection in triangulate_with_reproj; the mono
-    hand-cam prediction is kept as fallback for fuse_goliath70).
+    Runs the decoder on every view in `views` — all views in a SINGLE
+    batched forward (_hand_decoder_step_views) — and triangulates the 21
+    keypoints of each hand across the views, exactly like the body markers:
+    metric scale and robustness when one view loses the hand (per-joint
+    epipolar rejection in triangulate_with_reproj; the mono hand-cam
+    prediction is kept as fallback for fuse_goliath70).
     views=[hand_cam] = original mono behaviour.
     """
 
@@ -441,20 +503,22 @@ class HandWorker(threading.Thread):
                 time.sleep(0.003)
                 continue
             t0 = time.perf_counter()
-            per = {}                        # view → _hand_decoder_step output
+            frames, k17s = {}, {}
             for v in self.views:
                 frame, _, _ = self.cams[v].latest()
                 if frame is None:
                     continue
-                # COCO-17 layout expected by _hand_decoder_step, synthesized
+                frames[v] = frame
+                # COCO-17 layout expected by the decoder step, synthesized
                 # from THIS view's NLF markers (wrist/elbow = lat+med midpoints)
-                k17 = markers_to_coco17(res["kp2d"][v], res["scores"][v],
-                                        self.args.det_thr)
-                per[v] = _hand_decoder_step(self.model, frame, k17,
-                                            self.cam_ints[v], self.args)
-            if not per:
+                k17s[v] = markers_to_coco17(res["kp2d"][v], res["scores"][v],
+                                            self.args.det_thr)
+            if not frames:
                 time.sleep(0.003)
                 continue
+            # one batched forward for all views (and both hands of each)
+            per = _hand_decoder_step_views(self.model, frames, k17s,
+                                           self.cam_ints, self.args)
             last_body = nb
             kp_r, kp_l, k3r, k3l, rbox, lbox = per.get(self.hand_cam,
                                                        (None,) * 6)
@@ -654,8 +718,8 @@ def main():
                    help="per-marker score threshold for triangulation/drawing")
     p.add_argument("--mono-hands", action="store_true",
                    help="run the hand decoder on the hand-cam only (original "
-                        "behaviour, ~2x faster hand rate) instead of all views "
-                        "+ stereo triangulation")
+                        "behaviour, half the decoder batch) instead of all "
+                        "views batched + stereo triangulation")
     p.add_argument("--hand-reproj-thr", type=float, default=15.0,
                    help="max reprojection error (px) for a stereo hand joint; "
                         "above → epipolar-inconsistent (occluded/hallucinated "
