@@ -774,11 +774,17 @@ def main():
     p.add_argument("--yolo-conf", type=float, default=0.2)
     p.add_argument("--yolo-imgsz", type=int, default=640)
     p.add_argument("--box-offset", type=float, default=0.35)
-    p.add_argument("--box-size", type=float, default=1.0)
+    p.add_argument("--box-size", type=float, default=1.4,
+                   help="hand box side, in projected forearm lengths. The old "
+                        "default (1.0) left ~zero margin past the fingertips "
+                        "(the GPU crop is 0.9x the box on top): spread fingers "
+                        "got clipped — check the 'Hand crops' Rerun panel")
     p.add_argument("--box-scale-mode", choices=["stable", "forearm"], default="stable",
                    help="stable: shoulder-width floor on the hand box (no foreshortening "
                         "shrink); forearm: original behaviour")
-    p.add_argument("--box-shoulder-frac", type=float, default=0.5)
+    p.add_argument("--box-shoulder-frac", type=float, default=0.65,
+                   help="box floor = this x projected shoulder width (matters "
+                        "when the forearm points at the camera)")
     p.add_argument("--hand-res", type=int, default=0)
     p.add_argument("--rerun-mode", choices=["web", "native", "save"], default="web")
     p.add_argument("--rerun-grpc-port", type=int, default=9876)
