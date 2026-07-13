@@ -13,17 +13,22 @@ pipeline later.
 Architecture (decoupled rates — the body never waits for the hands):
   capture thread per camera  → latest frame + timestamp (soft sync)
   body worker                → YOLO + NLF per view (batched) → triangulate 43×3 metric
-  hand worker    (~15-20 Hz) → SAM hand decoder on the hand-cam wrist crops
-  main loop      (body rate) → fuse (fingers re-anchored at the metric wrists),
-                               Rerun logging, recording
+  hand worker                → SAM hand decoder on EVERY view's wrist crops →
+                               hand keypoints STEREO-triangulated across views
+                               (metric scale, occlusion-robust; per-joint
+                               epipolar check, mono fallback; --mono-hands =
+                               old hand-cam-only behaviour, ~2x faster)
+  main loop      (body rate) → fuse (stereo hands, else fingers re-anchored at
+                               the metric wrists), Rerun logging, recording
 
 Outputs (in --output_dir):
-  markers_3d.npy     (T, 43, 3)      metric 3D, cam0/world frame (MARKER_NAMES order)
-  markers_2d.npy     (T, ncam, 43, 2)
-  hands_2d.npy       (T, 42, 2)      hand-cam pixels (right 0-20, left 21-41)
-  goliath70_3d.npy   (T, 70, 3)      markers mapped to Goliath + anchored fingers
-  timestamps.npy     (T,)
-  overlay_cam0.mp4   (with --save-video)
+  markers_3d.npy      (T, 43, 3)       metric 3D, cam0/world frame (MARKER_NAMES order)
+  markers_2d.npy      (T, ncam, 43, 2)
+  hands_2d.npy        (T, 42, 2)       hand-cam pixels (right 0-20, left 21-41)
+  hands_2d_views.npy  (T, ncam, 42, 2) decoder pixels per view (stereo input)
+  goliath70_3d.npy    (T, 70, 3)       markers mapped to Goliath + fused fingers
+  timestamps.npy      (T,)
+  overlay_cam0.mp4    (with --save-video)
 
 Calibration (--calib) accepts:
   - stereo npz  : keys K1,D1,K2,D2,R,T          (2 cameras, cam0 = reference)
@@ -216,6 +221,30 @@ def triangulate_multiview(pts2d, scores, Ks, Ds, Rs, Ts, thr=0.3):
     return out
 
 
+def triangulate_with_reproj(pts2d, Ks, Ds, Rs, Ts, reproj_thr):
+    """Triangulate (ncam, J, 2) pixels → (J, 3) world, rejecting bad joints.
+
+    Unlike the NLF markers, the hand decoder has no confidence output — an
+    occluded hand still yields plausible-LOOKING 2D from the crop, and DLT
+    would happily blend it into garbage. So after triangulation each joint is
+    reprojected into every contributing view and dropped (NaN) when any view
+    disagrees by more than reproj_thr pixels: inconsistent views violate the
+    epipolar constraint, consistent hallucination across views is unlikely.
+    """
+    sc = np.isfinite(pts2d).all(2).astype(np.float32)
+    X = triangulate_multiview(pts2d, sc, Ks, Ds, Rs, Ts, thr=0.5)
+    for i in range(len(Ks)):
+        v = np.isfinite(X).all(1) & np.isfinite(pts2d[i]).all(1)
+        if not v.any():
+            continue
+        rvec, _ = cv2.Rodrigues(Rs[i])
+        proj, _ = cv2.projectPoints(X[v].astype(np.float64).reshape(-1, 1, 3),
+                                    rvec, Ts[i].reshape(3, 1), Ks[i], Ds[i])
+        err = np.linalg.norm(proj.reshape(-1, 2) - pts2d[i][v], axis=1)
+        X[np.flatnonzero(v)[err > reproj_thr]] = np.nan
+    return X
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # WORKERS (shared latest-value slots, drop-old everywhere)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -381,37 +410,76 @@ class BodyWorker(threading.Thread):
 
 
 class HandWorker(threading.Thread):
-    """SAM hand decoder on the hand camera, guided by that view's NLF wrists."""
+    """SAM hand decoder guided by the NLF wrists — stereo across the views.
 
-    def __init__(self, cam, body, model, cam_int, args, view_idx):
+    Runs the decoder on every view in `views` (sequential GPU calls) and
+    triangulates the 21 keypoints of each hand across the views, exactly like
+    the body markers: metric scale and robustness when one view loses the
+    hand (per-joint epipolar rejection in triangulate_with_reproj; the mono
+    hand-cam prediction is kept as fallback for fuse_goliath70).
+    views=[hand_cam] = original mono behaviour.
+    """
+
+    def __init__(self, cams, body, model, calib, args, views, hand_cam):
         super().__init__(daemon=True)
-        self.cam, self.body, self.model = cam, body, model
-        self.cam_int, self.args, self.view = cam_int, args, view_idx
-        self.result = None            # dict: kp_r/kp_l 2D, k3r/k3l cam-frame 3D, ms
+        self.cams, self.body, self.model = cams, body, model
+        self.calib, self.args = calib, args
+        self.views, self.hand_cam = views, hand_cam
+        self.cam_ints = {v: torch.tensor([calib[0][v]], dtype=torch.float32)
+                         for v in views}
+        self.result = None   # dict: hand-cam kp_r/kp_l/k3r/k3l + stereo X_r/X_l
         self.n = 0
         self._lock = threading.Lock()
 
     def run(self):
+        Ks, Ds, Rs, Ts = self.calib
+        ncam = len(Ks)
         last_body = -1
         while not _STOP.is_set():
             res, nb = self.body.latest()
-            frame, _, _ = self.cam.latest()
-            if res is None or frame is None or nb == last_body:
+            if res is None or nb == last_body:
+                time.sleep(0.003)
+                continue
+            t0 = time.perf_counter()
+            per = {}                        # view → _hand_decoder_step output
+            for v in self.views:
+                frame, _, _ = self.cams[v].latest()
+                if frame is None:
+                    continue
+                # COCO-17 layout expected by _hand_decoder_step, synthesized
+                # from THIS view's NLF markers (wrist/elbow = lat+med midpoints)
+                k17 = markers_to_coco17(res["kp2d"][v], res["scores"][v],
+                                        self.args.det_thr)
+                per[v] = _hand_decoder_step(self.model, frame, k17,
+                                            self.cam_ints[v], self.args)
+            if not per:
                 time.sleep(0.003)
                 continue
             last_body = nb
-            # COCO-17 layout expected by _hand_decoder_step, synthesized from
-            # the NLF markers (wrist/elbow = lateral+medial midpoints)
-            k17 = markers_to_coco17(res["kp2d"][self.view],
-                                    res["scores"][self.view], self.args.det_thr)
-            t0 = time.perf_counter()
-            kp_r, kp_l, k3r, k3l, rbox, lbox = _hand_decoder_step(
-                self.model, frame, k17, self.cam_int, self.args)
+            kp_r, kp_l, k3r, k3l, rbox, lbox = per.get(self.hand_cam,
+                                                       (None,) * 6)
+            # stack each hand's 2D across views and stereo-triangulate
+            kp2d_views = np.full((ncam, 42, 2), np.nan, np.float32)
+            for v, out in per.items():
+                if out[0] is not None:
+                    kp2d_views[v, :21] = out[0]
+                if out[1] is not None:
+                    kp2d_views[v, 21:] = out[1]
+            X_r = X_l = None
+            if len(self.views) >= 2:
+                X_r = triangulate_with_reproj(kp2d_views[:, :21], Ks, Ds, Rs,
+                                              Ts, self.args.hand_reproj_thr)
+                X_l = triangulate_with_reproj(kp2d_views[:, 21:], Ks, Ds, Rs,
+                                              Ts, self.args.hand_reproj_thr)
             ms = (time.perf_counter() - t0) * 1e3
             with self._lock:
                 self.result = {"kp_r": kp_r, "kp_l": kp_l,
                                "k3r": k3r, "k3l": k3l, "ms": ms,
-                               "rbox": rbox, "lbox": lbox}
+                               "rbox": rbox, "lbox": lbox,
+                               "X_r": X_r, "X_l": X_l,
+                               "kp2d_views": kp2d_views,
+                               "views": {v: (out[0], out[1], out[4], out[5])
+                                         for v, out in per.items()}}
                 self.n += 1
 
     def latest(self):
@@ -423,14 +491,23 @@ class HandWorker(threading.Thread):
 # FUSION — fingers re-anchored at the metric wrists
 # ═══════════════════════════════════════════════════════════════════════════
 
+# a stereo hand block is trusted only when the wrist AND most of the 21
+# joints pass the epipolar check — below that, the coherent mono hand wins
+MIN_STEREO_JOINTS = 12
+
+
 def fuse_goliath70(mk3d, hands, R_world_handcam):
     """(43,3) metric markers + decoder hands → (70,3) Goliath, world/cam0 frame.
 
     Elbow/wrist Goliath slots get the lateral+medial marker midpoints (true
-    joint centres). Decoder hand offsets are rotated from the hand-camera
-    frame into the world frame, then anchored at the triangulated (metric)
-    wrist centre. The decoder's own hand size is kept (MHR average-hand
-    scale, roughly metric).
+    joint centres). Hand blocks, best source first:
+      1. STEREO (X_r/X_l): keypoints triangulated across the views — true
+         metric scale AND absolute position; joints that failed the epipolar
+         check are filled with the mono offsets re-anchored at the stereo
+         wrist, so the hand stays internally consistent.
+      2. MONO: decoder offsets rotated from the hand-camera frame into the
+         world frame, anchored at the triangulated (metric) wrist centre,
+         with the decoder's own hand size (MHR average-hand scale).
     """
     g = np.full((70, 3), np.nan, np.float32)
     for m, gi in MARKER2GOLIATH.items():
@@ -439,11 +516,22 @@ def fuse_goliath70(mk3d, hands, R_world_handcam):
         g[gi] = _pair_mid(mk3d, a, b)
     if hands is None:
         return g
-    for dec, sl, pair, disp in ((hands["k3r"], slice(21, 42), R_WRIST_PAIR, (+0.15, 0, 0.5)),
-                                (hands["k3l"], slice(42, 63), L_WRIST_PAIR, (-0.15, 0, 0.5))):
-        if dec is None:
+    for dec, Xst, sl, pair, disp in (
+            (hands["k3r"], hands.get("X_r"), slice(21, 42), R_WRIST_PAIR, (+0.15, 0, 0.5)),
+            (hands["k3l"], hands.get("X_l"), slice(42, 63), L_WRIST_PAIR, (-0.15, 0, 0.5))):
+        off = None
+        if dec is not None:
+            off = (dec - dec[_H_WRIST]) @ R_world_handcam.T
+        if Xst is not None:
+            vst = np.isfinite(Xst).all(1)
+            if vst[_H_WRIST] and vst.sum() >= MIN_STEREO_JOINTS:
+                h = Xst.astype(np.float32).copy()
+                if off is not None:
+                    h[~vst] = Xst[_H_WRIST] + off[~vst]   # occluded joints: mono fill
+                g[sl] = h
+                continue
+        if off is None:
             continue
-        off = (dec - dec[_H_WRIST]) @ R_world_handcam.T
         wrist = _pair_mid(mk3d, *pair)
         if np.isfinite(wrist).all():
             g[sl] = wrist + off                      # metric wrist anchor
@@ -564,6 +652,14 @@ def main():
                         "captured with the same flag.")
     p.add_argument("--det-thr", type=float, default=0.3,
                    help="per-marker score threshold for triangulation/drawing")
+    p.add_argument("--mono-hands", action="store_true",
+                   help="run the hand decoder on the hand-cam only (original "
+                        "behaviour, ~2x faster hand rate) instead of all views "
+                        "+ stereo triangulation")
+    p.add_argument("--hand-reproj-thr", type=float, default=15.0,
+                   help="max reprojection error (px) for a stereo hand joint; "
+                        "above → epipolar-inconsistent (occluded/hallucinated "
+                        "in a view) → mono fallback for that joint")
     p.add_argument("--rtcosmik", default="~/code/RT-COSMIK",
                    help="RT-COSMIK clone (branch nlf_humble) — provides the "
                         "NLFEstimator code and the default weight locations")
@@ -633,7 +729,6 @@ def main():
         local_mhr_path=os.path.join(args.checkpoint_dir, "assets", "mhr_model.pt"),
         detector_name="", fov_name="", device="cuda",
     )
-    hand_cam_int = torch.tensor([Ks[args.hand_cam]], dtype=torch.float32)
     R_world_handcam = Rs[args.hand_cam].T          # cam→world (world = cam0 frame)
 
     print("[3/4] Cameras + workers (NLF warmup ~10 s)...")
@@ -643,8 +738,13 @@ def main():
         c.start()
     body = BodyWorker(cams, Ks, Ds, Rs, Ts, args.det_thr, args)
     body.start()
-    hands = HandWorker(cams[args.hand_cam], body, est.model, hand_cam_int,
-                       args, args.hand_cam)
+    hand_views = ([args.hand_cam] if (args.mono_hands or ncam < 2)
+                  else list(range(ncam)))
+    if len(hand_views) >= 2:
+        print(f"  STEREO hands: decoder on views {hand_views}, epipolar check "
+              f"{args.hand_reproj_thr:.0f}px (--mono-hands to disable)")
+    hands = HandWorker(cams, body, est.model, (Ks, Ds, Rs, Ts), args,
+                       hand_views, args.hand_cam)
     hands.start()
 
     if args.emit_hand_port > 0:
@@ -655,7 +755,7 @@ def main():
 
     rec = None
     if not args.no_record:
-        rec = {"b3d": [], "b2d": [], "h2d": [], "g70": [], "ts": []}
+        rec = {"b3d": [], "b2d": [], "h2d": [], "h2dv": [], "g70": [], "ts": []}
     vw = None
 
     print("[4/4] LIVE — Ctrl+C to stop.")
@@ -674,11 +774,20 @@ def main():
 
             g70 = fuse_goliath70(res["kp3d"], hres, R_world_handcam)
 
-            # stream the right hand (wrist-relative camera-frame 3D) to the teleop MPC
-            if args.emit_hand_port > 0 and hres is not None and hres["k3r"] is not None:
-                k = (hres["k3r"] - hres["k3r"][20]).astype(np.float32)
-                stream_demo._EMIT["buf"] = k.tobytes()
-                stream_demo._EMIT["n"] = hands.n
+            # stream the right hand (wrist-relative 3D) to the teleop MPC —
+            # fused (stereo when trusted, world frame) with the raw mono
+            # decoder as fallback; same 21x3 float32 payload either way
+            if args.emit_hand_port > 0 and hres is not None:
+                hr = g70[21:42]
+                if np.isfinite(hr).all():
+                    k = (hr - hr[_H_WRIST]).astype(np.float32)
+                elif hres["k3r"] is not None:
+                    k = (hres["k3r"] - hres["k3r"][_H_WRIST]).astype(np.float32)
+                else:
+                    k = None
+                if k is not None:
+                    stream_demo._EMIT["buf"] = k.tobytes()
+                    stream_demo._EMIT["n"] = hands.n
 
             # overlays
             overlays = []
@@ -691,13 +800,14 @@ def main():
                 if np.isfinite(pb).all():
                     x, y, w, h = pb.astype(int)
                     cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 120), 2)
-                if i == args.hand_cam and hres is not None:
+                if hres is not None and i in hres["views"]:
                     from body_hand_decoder_extractor import _draw_hand
-                    if hres["kp_r"] is not None:
-                        img = _draw_hand(img, hres["kp_r"])
-                    if hres["kp_l"] is not None:
-                        img = _draw_hand(img, hres["kp_l"])
-                    for box in (hres.get("rbox"), hres.get("lbox")):
+                    vkr, vkl, vrb, vlb = hres["views"][i]
+                    if vkr is not None:
+                        img = _draw_hand(img, vkr)
+                    if vkl is not None:
+                        img = _draw_hand(img, vkl)
+                    for box in (vrb, vlb):
                         if box is not None and np.isfinite(box).all():
                             cv2.rectangle(img, tuple(box[:2].astype(int)),
                                           tuple(box[2:].astype(int)),
@@ -728,6 +838,8 @@ def main():
                     if hres["kp_l"] is not None:
                         h2d[21:] = hres["kp_l"]
                 rec["h2d"].append(h2d)
+                rec["h2dv"].append(hres["kp2d_views"] if hres is not None
+                                   else np.full((ncam, 42, 2), np.nan, np.float32))
                 rec["g70"].append(g70)
                 rec["ts"].append(t_wall)
             if args.save_video:
@@ -739,11 +851,16 @@ def main():
 
             if nb % 60 == 0:
                 cams_fps = " ".join(f"cam{i} {c.fps:.0f}" for i, c in enumerate(cams))
+                st = ""
+                if hres is not None and hres.get("X_r") is not None:
+                    nr = int(np.isfinite(hres["X_r"]).all(1).sum())
+                    nl = int(np.isfinite(hres["X_l"]).all(1).sum())
+                    st = f", stereo hand jts R {nr}/21 L {nl}/21"
                 print(f"  body {ema or 0:4.1f} Hz  (total {res['ms']:.0f} ms: "
                       f"yolo {res['yolo_ms']:.0f} + nlf {res['nlf_ms']:.0f}, "
                       f"hands {hres['ms'] if hres else 0:.0f} ms, "
                       f"capture: {cams_fps} fps, "
-                      f"sync spread {res['sync_ms']:.0f} ms)", flush=True)
+                      f"sync spread {res['sync_ms']:.0f} ms{st})", flush=True)
     except KeyboardInterrupt:
         pass
     finally:
@@ -754,6 +871,7 @@ def main():
             np.save(os.path.join(out_dir, "markers_3d.npy"), np.stack(rec["b3d"]))
             np.save(os.path.join(out_dir, "markers_2d.npy"), np.stack(rec["b2d"]))
             np.save(os.path.join(out_dir, "hands_2d.npy"), np.stack(rec["h2d"]))
+            np.save(os.path.join(out_dir, "hands_2d_views.npy"), np.stack(rec["h2dv"]))
             np.save(os.path.join(out_dir, "goliath70_3d.npy"), np.stack(rec["g70"]))
             np.save(os.path.join(out_dir, "timestamps.npy"), np.asarray(rec["ts"]))
             print(f"  saved {len(rec['ts'])} frames to {out_dir}/")
