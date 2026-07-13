@@ -60,6 +60,23 @@ python hand_teleop_node.py --listen localhost:8092 --no-ros        # dry run, no
 - Tip offsets default to `TIP_OFFSETS_CALIB` (slider-calibrated, local distal frame, metres).
 - Node safety: `--vmax` (rad/s, also the startup ramp), `--stale` (hold), `--release` (drift to neutral).
 
+### Self-collision (sharpa)
+
+The MPC carries slacked sphere constraints between phalanges (`collision_spheres`
+/`collision_pairs` in the hand config; orca has none yet). Spheres sit at the
+midpoint of each proximal/middle phalanx, radii from the collision-STL
+half-widths minus ~1 mm — adjacent MCPs are only 20.5 mm apart, so full radii
+would bind at rest. **Fingertip contact stays free by construction**: the four
+fingers' distal segments carry no sphere (pinching, fingers held together),
+and no thumb-vs-distal pair exists (tip-to-tip opposition); with abduction at
+the MCP, constraining PP/MP still blocks actual finger crossing (verified:
+scissor pose at AA limits violates by 12 mm, tightest pinch keeps +4 mm on
+every constrained pair). The constraints are soft (L1 1e2 / L2 1e5 on m²
+violations) so the solver can never go infeasible. Flags on both
+`retarget_mpc.py` and `hand_teleop_node.py`: `--no-self-collision`,
+`--col-margin <m>` (extra clearance, default 0 = allow light touch, block
+interpenetration); viser can draw the spheres with `--show-collision`.
+
 ## Driving the real hand
 
 `hand_teleop_node.py` publishes a `sensor_msgs/JointState` on `--topic` (default

@@ -72,6 +72,8 @@ class HandConfig:
     default_topic: str
     publish_order: tuple = ()      # URDF joint names in the driver's index order
     publish_names: tuple = ()      # JointState names (defaults to publish_order)
+    collision_spheres: dict = None # name → (frameA, frameB, radius_m); sphere at the frames' midpoint
+    collision_pairs: tuple = ()    # (sphere_a, sphere_b) self-collision constraints in the MPC
 
 
 # ── Orca (v1 right): CAD-hash names, chains AP (MCP) → PP (PIP) → distal ────
@@ -128,6 +130,47 @@ _SHARPA_NAMES = tuple(
        for j in ("MCP_FE", "MCP_AA", "PIP", "DIP")]
     + ["pinky_CMC_FE", "pinky_MCP_FE", "pinky_MCP_AA", "pinky_PIP", "pinky_DIP"])
 
+# ── Sharpa self-collision spheres ───────────────────────────────────────────
+# One sphere per proximal/middle phalanx (at the midpoint of its two joint
+# frames), radii from the collision-STL half-widths minus ~1 mm (PP 9.3 mm,
+# MP 8.6 mm, thumb PP 9.9 mm, thumb DP 8.3 mm; adjacent MCPs are only
+# 20.5-21.7 mm apart → real lateral gap ~2 mm, so full radii would bind at
+# neutral). The DISTAL segments of the four fingers carry NO sphere:
+# fingertip contact (pinching, fingers held together) is intentional, and
+# since abduction lives at the MCP, constraining PP/MP already prevents the
+# tips from actually crossing. The thumb keeps a distal sphere against the
+# index/middle phalanges (sweeping under flexed fingers), but there is no
+# thumb-vs-finger-distal pair, so tip-to-tip opposition stays free.
+def _sharpa_collision():
+    sph = {}
+    for fg in ("index", "middle", "ring", "pinky"):
+        sph[f"{fg}_prox"] = (f"right_{fg}_PP", f"right_{fg}_MP", 0.0085)
+        sph[f"{fg}_mid"] = (f"right_{fg}_MP", f"right_{fg}_DP", 0.0080)
+    sph["thumb_prox"] = ("right_thumb_PP", "right_thumb_DP", 0.0090)
+    sph["thumb_dist"] = ("right_thumb_DP", "right_thumb_fingertip", 0.0080)
+    pairs = [(f"{a}_{s}", f"{b}_{s}")
+             for a, b in (("index", "middle"), ("middle", "ring"),
+                          ("ring", "pinky"))
+             for s in ("prox", "mid")]
+    pairs += [(ts, f"{fg}_{s}") for ts in ("thumb_prox", "thumb_dist")
+              for fg in ("index", "middle") for s in ("prox", "mid")]
+    return sph, tuple(pairs)
+
+
+_SHARPA_COL_SPHERES, _SHARPA_COL_PAIRS = _sharpa_collision()
+
+
+def collision_gaps(cfg, model, data, margin=0.0):
+    """Per-pair (a, b, gap_m) given FK already computed in `data`;
+    gap = ||c_a − c_b|| − (r_a + r_b + margin), negative = violated."""
+    c = {n: 0.5 * (data.oMf[model.getFrameId(fa)].translation
+                   + data.oMf[model.getFrameId(fb)].translation)
+         for n, (fa, fb, _) in cfg.collision_spheres.items()}
+    return [(a, b, float(np.linalg.norm(c[a] - c[b]))
+             - (cfg.collision_spheres[a][2] + cfg.collision_spheres[b][2] + margin))
+            for a, b in cfg.collision_pairs]
+
+
 HANDS = {
     "orca": HandConfig(
         name="orca",
@@ -148,6 +191,8 @@ HANDS = {
         default_topic="wave/right/joint_commands",  # SDK's wave_ros_server.py
         publish_order=_SHARPA_ORDER,
         publish_names=_SHARPA_NAMES,
+        collision_spheres=_SHARPA_COL_SPHERES,
+        collision_pairs=_SHARPA_COL_PAIRS,
     ),
 }
 
@@ -246,7 +291,7 @@ class PalmMapper:
 
 class HandMPC:
     def __init__(self, cfg, model, static_track, w_tip, N=8, dt=0.04,
-                 w_dq=1e-3, w_u=1e-4):
+                 w_dq=1e-3, w_u=1e-4, self_collision=True, col_margin=0.0):
         import casadi
         import pinocchio.casadi as cpin
         from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
@@ -305,9 +350,44 @@ class HandMPC:
         ocp.cost.yref_e = np.zeros(nv)
         ocp.cost.W_e = w_dq * np.eye(nv)
 
-        am.con_h_expr = cq
-        ocp.constraints.lh = np.array(model.lowerPositionLimit)
-        ocp.constraints.uh = np.array(model.upperPositionLimit)
+        # h constraints: joint limits (hard) + self-collision spheres (slacked).
+        # Same pattern as the lab's collision-avoidance MPC: for each pair,
+        # ||c_a − c_b||² − r_safe² ≥ 0 with the sphere centres at phalanx
+        # midpoints (FK). Pinch-relevant pairs are simply absent from the list
+        # (see _sharpa_collision).
+        self.col_pairs = (tuple(cfg.collision_pairs)
+                          if (self_collision and cfg.collision_spheres) else ())
+        self.col_margin = col_margin
+        h_exprs = [cq]
+        lh = [np.array(model.lowerPositionLimit)]
+        uh = [np.array(model.upperPositionLimit)]
+        if self.col_pairs:
+            cen = {n: 0.5 * (cdata.oMf[cmodel.getFrameId(fa)].translation
+                             + cdata.oMf[cmodel.getFrameId(fb)].translation)
+                   for n, (fa, fb, _) in cfg.collision_spheres.items()}
+            for a, b in self.col_pairs:
+                r_safe = (cfg.collision_spheres[a][2]
+                          + cfg.collision_spheres[b][2] + col_margin)
+                h_exprs.append(casadi.sumsqr(cen[a] - cen[b]) - r_safe ** 2)
+            lh.append(np.zeros(len(self.col_pairs)))
+            uh.append(np.full(len(self.col_pairs), 1e9))
+        am.con_h_expr = casadi.vertcat(*h_exprs)
+        ocp.constraints.lh = np.concatenate(lh)
+        ocp.constraints.uh = np.concatenate(uh)
+        if self.col_pairs:
+            # slack ONLY the collision rows (joint limits stay hard): the QP can
+            # never go infeasible — a violated start just pays a steep penalty
+            # and gets pushed out. h is in m² so gradients are ~2·d·∂d; 1e2/1e5
+            # dwarf the tip cost (w_tip=50, mm-scale errors) near contact.
+            # Stage 0 (pinned x0) is safe on both acados generations: new ones
+            # only apply con_h_expr at nodes 1..N-1 (node 0 needs con_h_expr_0,
+            # unset here), old ones apply idxsh slacks at node 0 too.
+            ns = len(self.col_pairs)
+            ocp.constraints.idxsh = np.arange(nq, nq + ns)
+            ocp.cost.zl = 1e2 * np.ones(ns)
+            ocp.cost.zu = 1e2 * np.ones(ns)
+            ocp.cost.Zl = 1e5 * np.ones(ns)
+            ocp.cost.Zu = 1e5 * np.ones(ns)
         ocp.constraints.x0 = np.zeros(nq + nv)
         ocp.parameter_values = np.zeros(3 * self.n_tips)
 
@@ -320,6 +400,20 @@ class HandMPC:
         so.tol = 1e-4
         so.ext_fun_compile_flags = os.environ.get("ACADOS_EXT_FUN_COMPILE_FLAGS", "-O1")
         self.solver = AcadosOcpSolver(ocp)
+
+        if self.col_pairs:                     # sanity: must be feasible at rest
+            data = model.createData()
+            pin.forwardKinematics(model, data, pin.neutral(model))
+            pin.updateFramePlacements(model, data)
+            gaps = collision_gaps(cfg, model, data, col_margin)
+            worst = min(gaps, key=lambda g: g[2])
+            print(f"  self-collision: {len(gaps)} sphere pairs (slacked), "
+                  f"neutral worst gap {worst[0]}–{worst[1]} "
+                  f"{1e3 * worst[2]:.1f} mm")
+            for a, b, g in gaps:
+                if g <= 0:
+                    print(f"  ⚠ {a}–{b} violated at NEUTRAL ({1e3 * g:.1f} mm)"
+                          f" — shrink the radii or --col-margin")
 
     def warm_start(self, q):
         x0 = np.zeros(self.nq + self.nv)
@@ -358,7 +452,8 @@ class HandMPC:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class ViserViz:
-    def __init__(self, cfg, urdf_path, model, offsets, port=8080):
+    def __init__(self, cfg, urdf_path, model, offsets, port=8080,
+                 show_collision=False):
         import viser
         from viser.extras import ViserUrdf
         self.cfg = cfg
@@ -381,6 +476,17 @@ class ViserViz:
             f"/targets/{f}", radius=0.006, color=(255, 60, 60)) for f in FINGERS}
         self.green = {f: self.server.scene.add_icosphere(
             f"/urdf_tips/{f}", radius=0.005, color=(60, 255, 60)) for f in FINGERS}
+
+        self.col_spheres = {}
+        if show_collision and cfg.collision_spheres:
+            for n, (_, _, r) in cfg.collision_spheres.items():
+                try:
+                    self.col_spheres[n] = self.server.scene.add_icosphere(
+                        f"/collision/{n}", radius=r, color=(150, 150, 180),
+                        opacity=0.35)
+                except TypeError:              # older viser: no opacity kwarg
+                    self.col_spheres[n] = self.server.scene.add_icosphere(
+                        f"/collision/{n}", radius=r, color=(150, 150, 180))
 
         # per-finger sliders: LOCAL x/y/z offset in the distal frame
         self._sliders = {}
@@ -421,6 +527,10 @@ class ViserViz:
             self.green[f].position = M.translation + M.rotation @ self.offsets[f]
             if np.isfinite(tip_targets[i]).all():
                 self.red[f].position = tip_targets[i]
+        for n, h in self.col_spheres.items():
+            fa, fb, _ = self.cfg.collision_spheres[n]
+            h.position = 0.5 * (data.oMf[self.model.getFrameId(fa)].translation
+                                + data.oMf[self.model.getFrameId(fb)].translation)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -486,6 +596,12 @@ def main():
                         "along PIP→distal (default: use the slider-calibrated "
                         "TIP_OFFSETS_CALIB values)")
     p.add_argument("--tip-offset-thumb", type=float, default=None)
+    p.add_argument("--no-self-collision", action="store_true",
+                   help="drop the self-collision constraints from the MPC")
+    p.add_argument("--col-margin", type=float, default=0.0,
+                   help="extra safety margin (m) added to every sphere pair")
+    p.add_argument("--show-collision", action="store_true",
+                   help="draw the self-collision spheres in viser")
     p.add_argument("--free-wrist", action="store_true")
     p.add_argument("--viser-port", type=int, default=8080)
     p.add_argument("--replay-fps", type=float, default=25.0)
@@ -513,7 +629,8 @@ def main():
     mapper = PalmMapper(cfg, model, float(np.linalg.norm(offsets["middle"])))
 
     print("[2/4] Viser...")
-    viz = ViserViz(cfg, urdf, model, offsets, port=args.viser_port)
+    viz = ViserViz(cfg, urdf, model, offsets, port=args.viser_port,
+                   show_collision=args.show_collision)
     data = model.createData()
     q = pin.neutral(model)
     viz.set_q(q)
@@ -523,7 +640,9 @@ def main():
 
     print("[3/4] Building acados MPC (~1 min first time)...")
     mpc = HandMPC(cfg, model, static_track, args.w_tip, N=args.N, dt=args.dt,
-                  w_dq=args.w_dq, w_u=args.w_u)
+                  w_dq=args.w_dq, w_u=args.w_u,
+                  self_collision=not args.no_self_collision,
+                  col_margin=args.col_margin)
     mpc.warm_start(q)
 
     print("[4/4] Running — Ctrl+C to stop.")
@@ -575,9 +694,14 @@ def main():
                         tip = M.translation + M.rotation @ offsets[f]
                         per.append((f, np.linalg.norm(tip - tip_targets[i])))
                 detail = "  ".join(f"{f} {1e3*e:.0f}" for f, e in per)
+                col = ""
+                if mpc.col_pairs:
+                    g = min(collision_gaps(cfg, model, data, mpc.col_margin),
+                            key=lambda t: t[2])
+                    col = f" | col gap {1e3*g[2]:.0f} mm ({g[0]}·{g[1]})"
                 print(f"  {len(q_log)} solves | {1e3*st.mean():.1f} ms/solve | "
                       f"tip err mm: mean {1e3*np.mean([e for _, e in per]):.1f} "
-                      f"[{detail}]", flush=True)
+                      f"[{detail}]{col}", flush=True)
     except KeyboardInterrupt:
         pass
 

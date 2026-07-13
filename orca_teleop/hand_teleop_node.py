@@ -77,7 +77,9 @@ class HandTeleop:
 
         print("[2/2] Building acados MPC (~1 min first time)...")
         self.mpc = HandMPC(cfg, model, self.static_track, args.w_tip,
-                           N=args.N, dt=args.dt, w_dq=args.w_dq, w_u=args.w_u)
+                           N=args.N, dt=args.dt, w_dq=args.w_dq, w_u=args.w_u,
+                           self_collision=not args.no_self_collision,
+                           col_margin=args.col_margin)
         self.q_neutral = pin.neutral(model)
         self.mpc.warm_start(self.q_neutral)
 
@@ -247,6 +249,10 @@ def main():
     p.add_argument("--w-mcp", type=float, default=0.1)
     p.add_argument("--w-dq", type=float, default=1e-3)
     p.add_argument("--w-u", type=float, default=1e-4)
+    p.add_argument("--no-self-collision", action="store_true",
+                   help="drop the self-collision constraints from the MPC")
+    p.add_argument("--col-margin", type=float, default=0.0,
+                   help="extra safety margin (m) added to every sphere pair")
     p.add_argument("--vmax", type=float, default=3.0,
                    help="max published joint velocity (rad/s) — also the startup ramp")
     p.add_argument("--stale", type=float, default=0.5,
