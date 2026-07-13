@@ -29,6 +29,8 @@ Outputs (in --output_dir):
   hands_2d_views.npy  (T, ncam, 42, 2) decoder pixels per view (stereo input)
   goliath70_3d.npy    (T, 70, 3)       markers mapped to Goliath + fused fingers
   timestamps.npy      (T,)
+  timing.log          per-hand-iteration profiling (always written; body ms,
+                      hand prep/fwd/post/tri ms, stereo joint counts)
   overlay_cam0.mp4    (with --save-video)
 
 Calibration (--calib) accepts:
@@ -60,6 +62,12 @@ import stream_demo
 import argparse
 import threading
 import time
+import warnings
+
+# a dependency spams a "half is deprecated, use quantize" deprecation each
+# frame — harmless, silence it (python-warnings based emitters only)
+warnings.filterwarnings("ignore", message=r".*[Hh]alf.*deprecat.*")
+warnings.filterwarnings("ignore", message=r".*deprecat.*[Hh]alf.*")
 
 import cv2
 import numpy as np
@@ -794,8 +802,12 @@ def main():
 
     out_dir = args.output_dir or os.path.join(
         "output_cosmik_demo", time.strftime("%Y%m%d_%H%M%S"))
-    if not args.no_record or args.rerun_mode == "save":
-        os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
+    # per-hand-iteration profiling (line-buffered → tail -f friendly)
+    tlog = open(os.path.join(out_dir, "timing.log"), "w", buffering=1)
+    tlog.write("# wall_s body_hz body_ms yolo_ms nlf_ms sync_ms "
+               "hand_ms prep_ms fwd_ms post_ms tri_ms stereo_R stereo_L\n")
+    print(f"  timing log: {os.path.join(out_dir, 'timing.log')}")
 
     print("[1/4] Rerun viewer...")
     viz = Viz(args.rerun_mode, args.rerun_grpc_port, args.rerun_web_port, ncam, out_dir)
@@ -837,6 +849,7 @@ def main():
 
     print("[4/4] LIVE — Ctrl+C to stop.")
     last_body = -1
+    last_hand_log = -1
     ema = None
     t_prev = None
     try:
@@ -926,6 +939,21 @@ def main():
                                          cv2.VideoWriter_fourcc(*"mp4v"), 25, (w, h))
                 vw.write(overlays[0])
 
+            # profiling: one timing.log line per hand-worker iteration
+            if hres is not None and hands.n != last_hand_log:
+                last_hand_log = hands.n
+                t = hres.get("tms") or {}
+                nr = (int(np.isfinite(hres["X_r"]).all(1).sum())
+                      if hres.get("X_r") is not None else -1)
+                nl = (int(np.isfinite(hres["X_l"]).all(1).sum())
+                      if hres.get("X_l") is not None else -1)
+                tlog.write(f"{t_wall:.3f} {ema or 0:.1f} {res['ms']:.1f} "
+                           f"{res['yolo_ms']:.1f} {res['nlf_ms']:.1f} "
+                           f"{res['sync_ms']:.1f} {hres['ms']:.1f} "
+                           f"{t.get('prep_ms', 0):.1f} {t.get('fwd_ms', 0):.1f} "
+                           f"{t.get('post_ms', 0):.1f} {t.get('tri_ms', 0):.1f} "
+                           f"{nr} {nl}\n")
+
             if nb % 60 == 0:
                 cams_fps = " ".join(f"cam{i} {c.fps:.0f}" for i, c in enumerate(cams))
                 st = ""
@@ -933,11 +961,6 @@ def main():
                     nr = int(np.isfinite(hres["X_r"]).all(1).sum())
                     nl = int(np.isfinite(hres["X_l"]).all(1).sum())
                     st = f", stereo hand jts R {nr}/21 L {nl}/21"
-                if hres is not None and hres.get("tms"):
-                    t = hres["tms"]
-                    st += (f" [hand: prep {t['prep_ms']:.0f} + fwd "
-                           f"{t['fwd_ms']:.0f} + post {t['post_ms']:.0f} + "
-                           f"tri {t.get('tri_ms', 0):.0f} ms]")
                 print(f"  body {ema or 0:4.1f} Hz  (total {res['ms']:.0f} ms: "
                       f"yolo {res['yolo_ms']:.0f} + nlf {res['nlf_ms']:.0f}, "
                       f"hands {hres['ms'] if hres else 0:.0f} ms, "
@@ -947,6 +970,7 @@ def main():
         pass
     finally:
         _STOP.set()
+        tlog.close()
         if vw is not None:
             vw.release()
         if rec is not None and rec["ts"]:
