@@ -21,8 +21,13 @@ ring to maximize "sharp" — the peak seen so far is shown, so overshoot,
 come back, and stop at the max (corner count should peak with it).
 
 Controls:
-    s  — save current frame pair (only saved when corners detected in BOTH)
-    q  — quit
+    s    — save current frame pair (only saved when corners detected in BOTH)
+    -/+  — manual exposure down/up on BOTH cameras (x1.4 steps; V4L2 units of
+           ~100 us: 100 ~= 10 ms. Keep <=100 to avoid motion blur, raise gain
+           with [/] if too dark)
+    [/]  — gain down/up on BOTH cameras
+    a    — back to auto exposure on BOTH cameras
+    q    — quit
 """
 import argparse
 import os
@@ -88,6 +93,33 @@ if (cap0.get(cv2.CAP_PROP_FRAME_WIDTH) != args.width or
 count = 0
 sharp_peak = [0.0, 0.0]
 
+cur_exp = args.exposure if args.exposure is not None \
+    else max(cap0.get(cv2.CAP_PROP_EXPOSURE), 1.0)
+cur_gain = args.gain if args.gain is not None \
+    else cap0.get(cv2.CAP_PROP_GAIN)
+manual_exp = args.exposure is not None
+
+
+def set_exposure(exp=None, gain=None, auto=False):
+    """Apply the SAME exposure/gain to both cameras (or reset both to auto)."""
+    global cur_exp, cur_gain, manual_exp
+    for cap in (cap0, cap1):
+        if auto:
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+        else:
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+            if exp is not None:
+                cap.set(cv2.CAP_PROP_EXPOSURE, exp)
+            if gain is not None:
+                cap.set(cv2.CAP_PROP_GAIN, gain)
+    manual_exp = not auto
+    if auto:
+        print("exposure -> AUTO (both cams)")
+    else:
+        cur_exp = exp if exp is not None else cur_exp
+        cur_gain = gain if gain is not None else cur_gain
+        print(f"exposure -> {cur_exp:.0f}  gain -> {cur_gain:.0f} (both cams)")
+
 
 def sharpness(gray, pts):
     """Laplacian variance on the board bounding box (or center crop)."""
@@ -151,10 +183,11 @@ while True:
     disp0, ok0 = draw_overlay(0, frame0, gray0)
     disp1, ok1 = draw_overlay(1, frame1, gray1)
 
-    cv2.putText(disp0, f"saved: {count}", (10, 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-    cv2.putText(disp1, f"saved: {count}", (10, 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+    exp_txt = (f"exp {cur_exp:.0f} gain {cur_gain:.0f}" if manual_exp
+               else "exp auto")
+    for disp in (disp0, disp1):
+        cv2.putText(disp, f"saved: {count}   {exp_txt}", (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
     combined = cv2.hconcat([disp0, disp1])
     if combined.shape[1] > 2600:  # 2x1080p doesn't fit on screen
@@ -164,6 +197,16 @@ while True:
     key = cv2.waitKey(1) & 0xFF
     if key == ord('q'):
         break
+    if key in (ord('+'), ord('=')):
+        set_exposure(exp=min(cur_exp * 1.4, 5000))
+    if key == ord('-'):
+        set_exposure(exp=max(cur_exp / 1.4, 1.0))
+    if key == ord(']'):
+        set_exposure(gain=min((cur_gain or 0) + 10, 255))
+    if key == ord('['):
+        set_exposure(gain=max((cur_gain or 0) - 10, 0))
+    if key == ord('a'):
+        set_exposure(auto=True)
     if key == ord('s'):
         if ok0 and ok1:
             cv2.imwrite(f"images/cam0/frame_{count:04d}.png", frame0)
