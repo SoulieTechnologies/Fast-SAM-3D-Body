@@ -429,13 +429,15 @@ def _hand_decoder_step_views(model, frames, k17s, cam_ints, args):
     entry (expanded to persons in the hand path): each view keeps its own
     intrinsics. Flattened person order is then [v0-L, v0-R, v1-L, v1-R, ...].
 
-    Returns ({view: (kp_r21_2d, kp_l21_2d, k3_r21, k3_l21, rbox, lbox)}, tms)
-    — per view identical to _hand_decoder_step (3D in that view's camera
-    coords, left hand un-mirrored, NOT anchored); a view with a missing hand
-    box gets all-None keypoints. With a single view this computes exactly
-    what _hand_decoder_step does. tms = profiling breakdown in ms:
-    prep (cvtColor + GPU upload/crops), fwd (decoder forward, CUDA-synced),
-    post (GPU→CPU copies).
+    Returns ({view: (kp_r21_2d, kp_l21_2d, k3_r21, k3_l21, rbox, lbox)}, tms,
+    crops) — per view identical to _hand_decoder_step (3D in that view's
+    camera coords, left hand un-mirrored, NOT anchored); a view with a
+    missing hand box gets all-None keypoints. With a single view this
+    computes exactly what _hand_decoder_step does. tms = profiling breakdown
+    in ms: prep (cvtColor + GPU upload/crops), fwd (decoder forward,
+    CUDA-synced), post (GPU→CPU copies). crops = {view: (right_rgb,
+    left_rgb)} — the decoder's ACTUAL input tiles (left un-flipped back for
+    display), for judging crop tracking and --hand-res quality.
     """
     out_hw = ((args.hand_res, args.hand_res) if args.hand_res > 0
               else (model.cfg.MODEL.IMAGE_SIZE[1], model.cfg.MODEL.IMAGE_SIZE[0]))
@@ -454,7 +456,7 @@ def _hand_decoder_step_views(model, frames, k17s, cam_ints, args):
                 cam_ints[v], output_size=out_hw, padding=0.9, device="cuda")
             prep[v] = (bl, br, rbox, lbox)
         if not prep:
-            return per, tms
+            return per, tms, {}
         views = list(prep)
         bh = {k: torch.cat([torch.cat([prep[v][0][k], prep[v][1][k]], dim=1)
                             for v in views], dim=0)
@@ -485,8 +487,15 @@ def _hand_decoder_step_views(model, frames, k17s, cam_ints, args):
             k3l = p3d[2 * i][HAND_SRC].copy()
             k3l[:, 0] *= -1                                  # un-flip left hand
         per[v] = (kp_r, kp_l, k3r, k3l, prep[v][2], prep[v][3])
+    crops = {}
+    for v in views:
+        # decoder input tiles, back to uint8 RGB (left was decoded on the
+        # mirrored image → un-flip it so it reads naturally)
+        r = (prep[v][1]["img"][0, 0].permute(1, 2, 0) * 255).byte().cpu().numpy()
+        l = (prep[v][0]["img"][0, 0].permute(1, 2, 0) * 255).byte().cpu().numpy()
+        crops[v] = (r, np.ascontiguousarray(l[:, ::-1]))
     tms["post_ms"] = (time.perf_counter() - t0) * 1e3
-    return per, tms
+    return per, tms, crops
 
 
 class HandWorker(threading.Thread):
@@ -536,8 +545,8 @@ class HandWorker(threading.Thread):
                 time.sleep(0.003)
                 continue
             # one batched forward for all views (and both hands of each)
-            per, tms = _hand_decoder_step_views(self.model, frames, k17s,
-                                                self.cam_ints, self.args)
+            per, tms, crops = _hand_decoder_step_views(
+                self.model, frames, k17s, self.cam_ints, self.args)
             last_body = nb
             kp_r, kp_l, k3r, k3l, rbox, lbox = per.get(self.hand_cam,
                                                        (None,) * 6)
@@ -560,6 +569,7 @@ class HandWorker(threading.Thread):
             with self._lock:
                 self.result = {"kp_r": kp_r, "kp_l": kp_l,
                                "k3r": k3r, "k3l": k3l, "ms": ms, "tms": tms,
+                               "crops": crops,
                                "rbox": rbox, "lbox": lbox,
                                "X_r": X_r, "X_l": X_l,
                                "kp2d_views": kp2d_views,
@@ -649,6 +659,7 @@ class Viz:
             rrb.Vertical(
                 *[rrb.Spatial2DView(origin=f"cams/cam{i}", name=f"Camera {i}")
                   for i in range(ncam)],
+                rrb.Spatial2DView(origin="cams/hand_crops", name="Hand crops"),
                 rrb.TimeSeriesView(origin="timing", name="Latency (ms)"),
             ),
             rrb.Spatial3DView(origin="world", name="3D (metric)",
@@ -657,7 +668,7 @@ class Viz:
         )))
 
     def log(self, seq, t_wall, overlays, mk3d, g70, body_ms, hand_ms, sync_ms,
-            fps, cam_fps=None, jpeg_quality=75):
+            fps, cam_fps=None, jpeg_quality=75, hand_crops=None):
         rr = self.rr
         rr.set_time("frame", sequence=seq)
         rr.set_time("time", timestamp=t_wall)
@@ -671,6 +682,9 @@ class Viz:
         for i, img in enumerate(overlays):
             rr.log(f"cams/cam{i}", rr.Image(
                 cv2.cvtColor(img, cv2.COLOR_BGR2RGB)).compress(jpeg_quality=jpeg_quality))
+        if hand_crops is not None:                    # already RGB
+            rr.log("cams/hand_crops",
+                   rr.Image(hand_crops).compress(jpeg_quality=jpeg_quality))
         # 3D: NLF marker skeleton (metric) + Goliath fingers
         v = np.isfinite(mk3d).all(1)
         if v.any():
@@ -913,10 +927,26 @@ def main():
             cv2.putText(overlays[0], f"NLF markers + hand decoder  {ema or 0:4.1f} Hz",
                         (14, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
 
+            # strip of the decoder's actual input tiles: [v0 R | v0 L | v1 R ...]
+            crop_strip = None
+            if hres is not None and hres.get("crops"):
+                tiles = []
+                for v in sorted(hres["crops"]):
+                    for tile, lab in zip(hres["crops"][v], ("R", "L")):
+                        tile = tile.copy()
+                        cv2.putText(tile, f"cam{v} {lab}", (6, 24),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                                    (255, 255, 0), 2, cv2.LINE_AA)
+                        tiles.append(tile)
+                crop_strip = cv2.hconcat(tiles)
+                if crop_strip.shape[0] > 256:         # bandwidth: cap at 256 tall
+                    s = 256.0 / crop_strip.shape[0]
+                    crop_strip = cv2.resize(crop_strip, None, fx=s, fy=s)
+
             viz.log(nb, t_wall, overlays, res["kp3d"], g70,
                     res["ms"], hres["ms"] if hres else None, res["sync_ms"],
                     ema or 0.0, cam_fps=[c.fps for c in cams],
-                    jpeg_quality=args.jpeg_quality)
+                    jpeg_quality=args.jpeg_quality, hand_crops=crop_strip)
 
             if rec is not None:
                 rec["b3d"].append(res["kp3d"])
