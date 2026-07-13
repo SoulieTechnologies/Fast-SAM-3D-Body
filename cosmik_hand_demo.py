@@ -136,6 +136,8 @@ MARKER_PAIRS2GOLIATH = [(_M["LELB"], _M["LMELB"], 7), (_M["RELB"], _M["RMELB"], 
 # wrist joint centres (lateral, medial) used for hand crops and finger anchors
 R_WRIST_PAIR = (_M["RWRI"], _M["RMWRI"])
 L_WRIST_PAIR = (_M["LWRI"], _M["LMWRI"])
+R_ELBOW_PAIR = (_M["RELB"], _M["RMELB"])
+L_ELBOW_PAIR = (_M["LELB"], _M["LMELB"])
 
 
 def _pair_mid(kp, a, b):
@@ -428,7 +430,7 @@ def _metric_side_px(wrist_w, K, R, T, hand_size_m):
     heuristic. This makes the crop size exact at any distance, instead of
     the projected-forearm proxy that shrinks under foreshortening.
     """
-    if wrist_w is None or not np.isfinite(wrist_w).all():
+    if hand_size_m is None or wrist_w is None or not np.isfinite(wrist_w).all():
         return None
     z = float(R[2] @ wrist_w + T[2])
     if z < 0.2:
@@ -553,9 +555,27 @@ class HandWorker(threading.Thread):
         self.views, self.hand_cam = views, hand_cam
         self.cam_ints = {v: torch.tensor([calib[0][v]], dtype=torch.float32)
                          for v in views}
+        self._forearm = {"r": None, "l": None}   # EMA 3D forearm length (m)
         self.result = None   # dict: hand-cam kp_r/kp_l/k3r/k3l + stereo X_r/X_l
         self.n = 0
         self._lock = threading.Lock()
+
+    def _hand_size(self, key, wrist_w, elbow_w):
+        """Metric crop side (m) for one hand: hand_size_frac x the subject's
+        3D forearm length — a body constant, EMA'd over valid frames, so the
+        crop adapts to different body sizes instead of a manual constant.
+        Falls back to the fixed --hand-size-m until/unless estimated."""
+        a = self.args
+        if (a.hand_size_frac > 0 and np.isfinite(wrist_w).all()
+                and np.isfinite(elbow_w).all()):
+            L = float(np.linalg.norm(wrist_w - elbow_w))
+            if 0.15 < L < 0.45:                  # plausible human forearm
+                prev = self._forearm[key]
+                self._forearm[key] = L if prev is None else \
+                    0.95 * prev + 0.05 * L
+        if a.hand_size_frac > 0 and self._forearm[key] is not None:
+            return a.hand_size_frac * self._forearm[key]
+        return a.hand_size_m if a.hand_size_m > 0 else None
 
     def run(self):
         Ks, Ds, Rs, Ts = self.calib
@@ -581,15 +601,18 @@ class HandWorker(threading.Thread):
                 time.sleep(0.003)
                 continue
             # metric crop size from the triangulated 3D wrists: exact at any
-            # distance (2D-heuristic fallback per hand/view when 3D missing)
+            # distance, sized to THIS subject's 3D forearm length
+            # (2D-heuristic fallback per hand/view when 3D missing)
             sides = None
-            if self.args.hand_size_m > 0:
+            if self.args.hand_size_m > 0 or self.args.hand_size_frac > 0:
                 wr = _pair_mid(res["kp3d"], *R_WRIST_PAIR)
                 wl = _pair_mid(res["kp3d"], *L_WRIST_PAIR)
-                sides = {v: (_metric_side_px(wr, Ks[v], Rs[v], Ts[v],
-                                             self.args.hand_size_m),
-                             _metric_side_px(wl, Ks[v], Rs[v], Ts[v],
-                                             self.args.hand_size_m))
+                size_r = self._hand_size("r", wr,
+                                         _pair_mid(res["kp3d"], *R_ELBOW_PAIR))
+                size_l = self._hand_size("l", wl,
+                                         _pair_mid(res["kp3d"], *L_ELBOW_PAIR))
+                sides = {v: (_metric_side_px(wr, Ks[v], Rs[v], Ts[v], size_r),
+                             _metric_side_px(wl, Ks[v], Rs[v], Ts[v], size_l))
                          for v in frames}
             # one batched forward for all views (and both hands of each)
             per, tms, crops = _hand_decoder_step_views(
@@ -616,7 +639,7 @@ class HandWorker(threading.Thread):
             with self._lock:
                 self.result = {"kp_r": kp_r, "kp_l": kp_l,
                                "k3r": k3r, "k3l": k3l, "ms": ms, "tms": tms,
-                               "crops": crops,
+                               "crops": crops, "forearm": dict(self._forearm),
                                "rbox": rbox, "lbox": lbox,
                                "X_r": X_r, "X_l": X_l,
                                "kp2d_views": kp2d_views,
@@ -820,12 +843,18 @@ def main():
                         "to a .engine for TensorRT)")
     p.add_argument("--yolo-conf", type=float, default=0.2)
     p.add_argument("--yolo-imgsz", type=int, default=640)
+    p.add_argument("--hand-size-frac", type=float, default=1.05,
+                   help="metric hand-crop side = this x the subject's 3D "
+                        "forearm length (triangulated elbow->wrist, EMA'd — "
+                        "adapts to different body sizes; ~26.5 cm forearm -> "
+                        "28 cm box, delivering ~25 cm after the x0.9 GPU "
+                        "prep shrink). 0 = use the fixed --hand-size-m")
     p.add_argument("--hand-size-m", type=float, default=0.28,
-                   help="metric hand-crop size: box side = fx * this / wrist "
-                        "depth, per view, from the TRIANGULATED 3D wrist "
-                        "(exact at any distance). The GPU prep shrinks the "
-                        "box x0.9, so 0.28 delivers ~25 cm to the decoder. "
-                        "0 = disable (2D forearm heuristic only, also the "
+                   help="fixed metric hand-crop size (m): box side = fx * "
+                        "this / triangulated-wrist depth per view. Used "
+                        "until the forearm estimate exists (or always if "
+                        "--hand-size-frac 0). 0 = fully disable metric "
+                        "sizing (2D forearm heuristic only, also the "
                         "per-hand fallback when the 3D wrist is missing)")
     p.add_argument("--box-offset", type=float, default=0.35)
     p.add_argument("--box-size", type=float, default=1.4,
@@ -1051,6 +1080,11 @@ def main():
                     nr = int(np.isfinite(hres["X_r"]).all(1).sum())
                     nl = int(np.isfinite(hres["X_l"]).all(1).sum())
                     st = f", stereo hand jts R {nr}/21 L {nl}/21"
+                fa = (hres or {}).get("forearm") or {}
+                if fa.get("r") or fa.get("l"):
+                    st += (", forearm "
+                           + " ".join(f"{k.upper()} {v * 100:.0f}cm"
+                                      for k, v in fa.items() if v))
                 print(f"  body {ema or 0:4.1f} Hz  (total {res['ms']:.0f} ms: "
                       f"yolo {res['yolo_ms']:.0f} + nlf {res['nlf_ms']:.0f}, "
                       f"hands {hres['ms'] if hres else 0:.0f} ms, "
