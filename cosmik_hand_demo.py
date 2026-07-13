@@ -420,7 +420,42 @@ class BodyWorker(threading.Thread):
             return self.result, self.n
 
 
-def _hand_decoder_step_views(model, frames, k17s, cam_ints, args):
+def _metric_side_px(wrist_w, K, R, T, hand_size_m):
+    """Pixel side of a hand_size_m box at the 3D wrist's depth in one view.
+
+    wrist_w: (3,) triangulated wrist, world/cam0 frame. Returns None when the
+    wrist is missing/behind the camera → caller falls back to the 2D
+    heuristic. This makes the crop size exact at any distance, instead of
+    the projected-forearm proxy that shrinks under foreshortening.
+    """
+    if wrist_w is None or not np.isfinite(wrist_w).all():
+        return None
+    z = float(R[2] @ wrist_w + T[2])
+    if z < 0.2:
+        return None
+    return float(K[0, 0]) * hand_size_m / z
+
+
+def _hand_box_view(k17, wrist_i, elbow_i, args, side_px=None):
+    """Hand box for one view: center from the 2D forearm direction
+    (_hand_box_v2: wrist pushed toward the hand), SIZE from the metric 3D
+    depth when available, else the original 2D heuristic entirely."""
+    box = _hand_box_v2(k17, wrist_i, elbow_i, args)
+    if side_px is None or not np.isfinite(side_px):
+        return box
+    if box is not None:
+        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    elif np.isfinite(k17[wrist_i]).all():
+        # extreme foreshortening (no forearm direction): fingers project
+        # close to the wrist anyway → wrist-centered metric box
+        cx, cy = k17[wrist_i]
+    else:
+        return None
+    h = side_px / 2
+    return np.array([cx - h, cy - h, cx + h, cy + h], np.float32)
+
+
+def _hand_decoder_step_views(model, frames, k17s, cam_ints, args, sides=None):
     """rerun_demo._hand_decoder_step batched over views: ONE decoder forward.
 
     frames / k17s / cam_ints: dicts view → frame_bgr / (17,2) COCO pixels /
@@ -446,8 +481,9 @@ def _hand_decoder_step_views(model, frames, k17s, cam_ints, args):
     t0 = time.perf_counter()
     with torch.no_grad(), _quiet():
         for v, frame in frames.items():
-            rbox = _hand_box_v2(k17s[v], R_WRIST, R_ELBOW, args)
-            lbox = _hand_box_v2(k17s[v], L_WRIST, L_ELBOW, args)
+            sr, sl = (sides or {}).get(v, (None, None))
+            rbox = _hand_box_view(k17s[v], R_WRIST, R_ELBOW, args, sr)
+            lbox = _hand_box_view(k17s[v], L_WRIST, L_ELBOW, args, sl)
             per[v] = (None, None, None, None, rbox, lbox)
             if rbox is None or lbox is None:
                 continue
@@ -544,9 +580,20 @@ class HandWorker(threading.Thread):
             if not frames:
                 time.sleep(0.003)
                 continue
+            # metric crop size from the triangulated 3D wrists: exact at any
+            # distance (2D-heuristic fallback per hand/view when 3D missing)
+            sides = None
+            if self.args.hand_size_m > 0:
+                wr = _pair_mid(res["kp3d"], *R_WRIST_PAIR)
+                wl = _pair_mid(res["kp3d"], *L_WRIST_PAIR)
+                sides = {v: (_metric_side_px(wr, Ks[v], Rs[v], Ts[v],
+                                             self.args.hand_size_m),
+                             _metric_side_px(wl, Ks[v], Rs[v], Ts[v],
+                                             self.args.hand_size_m))
+                         for v in frames}
             # one batched forward for all views (and both hands of each)
             per, tms, crops = _hand_decoder_step_views(
-                self.model, frames, k17s, self.cam_ints, self.args)
+                self.model, frames, k17s, self.cam_ints, self.args, sides)
             last_body = nb
             kp_r, kp_l, k3r, k3l, rbox, lbox = per.get(self.hand_cam,
                                                        (None,) * 6)
@@ -773,6 +820,13 @@ def main():
                         "to a .engine for TensorRT)")
     p.add_argument("--yolo-conf", type=float, default=0.2)
     p.add_argument("--yolo-imgsz", type=int, default=640)
+    p.add_argument("--hand-size-m", type=float, default=0.28,
+                   help="metric hand-crop size: box side = fx * this / wrist "
+                        "depth, per view, from the TRIANGULATED 3D wrist "
+                        "(exact at any distance). The GPU prep shrinks the "
+                        "box x0.9, so 0.28 delivers ~25 cm to the decoder. "
+                        "0 = disable (2D forearm heuristic only, also the "
+                        "per-hand fallback when the 3D wrist is missing)")
     p.add_argument("--box-offset", type=float, default=0.35)
     p.add_argument("--box-size", type=float, default=1.4,
                    help="hand box side, in projected forearm lengths. The old "
