@@ -421,15 +421,19 @@ def _hand_decoder_step_views(model, frames, k17s, cam_ints, args):
     entry (expanded to persons in the hand path): each view keeps its own
     intrinsics. Flattened person order is then [v0-L, v0-R, v1-L, v1-R, ...].
 
-    Returns {view: (kp_r21_2d, kp_l21_2d, k3_r21, k3_l21, rbox, lbox)}, per
-    view identical to _hand_decoder_step (3D in that view's camera coords,
-    left hand un-mirrored, NOT anchored); a view with a missing hand box gets
-    all-None keypoints. With a single view this computes exactly what
-    _hand_decoder_step does.
+    Returns ({view: (kp_r21_2d, kp_l21_2d, k3_r21, k3_l21, rbox, lbox)}, tms)
+    — per view identical to _hand_decoder_step (3D in that view's camera
+    coords, left hand un-mirrored, NOT anchored); a view with a missing hand
+    box gets all-None keypoints. With a single view this computes exactly
+    what _hand_decoder_step does. tms = profiling breakdown in ms:
+    prep (cvtColor + GPU upload/crops), fwd (decoder forward, CUDA-synced),
+    post (GPU→CPU copies).
     """
     out_hw = ((args.hand_res, args.hand_res) if args.hand_res > 0
               else (model.cfg.MODEL.IMAGE_SIZE[1], model.cfg.MODEL.IMAGE_SIZE[0]))
     per, prep = {}, {}
+    tms = {"prep_ms": 0.0, "fwd_ms": 0.0, "post_ms": 0.0}
+    t0 = time.perf_counter()
     with torch.no_grad(), _quiet():
         for v, frame in frames.items():
             rbox = _hand_box_v2(k17s[v], R_WRIST, R_ELBOW, args)
@@ -442,7 +446,7 @@ def _hand_decoder_step_views(model, frames, k17s, cam_ints, args):
                 cam_ints[v], output_size=out_hw, padding=0.9, device="cuda")
             prep[v] = (bl, br, rbox, lbox)
         if not prep:
-            return per
+            return per, tms
         views = list(prep)
         bh = {k: torch.cat([torch.cat([prep[v][0][k], prep[v][1][k]], dim=1)
                             for v in views], dim=0)
@@ -451,7 +455,13 @@ def _hand_decoder_step_views(model, frames, k17s, cam_ints, args):
                         "mask_score", "person_valid")}
         bh["cam_int"] = torch.cat([prep[v][0]["cam_int"] for v in views], dim=0)
         model._initialize_batch(bh)
+        torch.cuda.synchronize()
+        tms["prep_ms"] = (time.perf_counter() - t0) * 1e3
+        t0 = time.perf_counter()
         merged = model.forward_step(bh, decoder_type="hand")
+        torch.cuda.synchronize()
+        tms["fwd_ms"] = (time.perf_counter() - t0) * 1e3
+    t0 = time.perf_counter()
     mhr = merged["mhr_hand"]
     p2d = mhr["pred_keypoints_2d"].detach().float().cpu().numpy()
     p3d = mhr.get("pred_keypoints_3d")
@@ -467,7 +477,8 @@ def _hand_decoder_step_views(model, frames, k17s, cam_ints, args):
             k3l = p3d[2 * i][HAND_SRC].copy()
             k3l[:, 0] *= -1                                  # un-flip left hand
         per[v] = (kp_r, kp_l, k3r, k3l, prep[v][2], prep[v][3])
-    return per
+    tms["post_ms"] = (time.perf_counter() - t0) * 1e3
+    return per, tms
 
 
 class HandWorker(threading.Thread):
@@ -517,8 +528,8 @@ class HandWorker(threading.Thread):
                 time.sleep(0.003)
                 continue
             # one batched forward for all views (and both hands of each)
-            per = _hand_decoder_step_views(self.model, frames, k17s,
-                                           self.cam_ints, self.args)
+            per, tms = _hand_decoder_step_views(self.model, frames, k17s,
+                                                self.cam_ints, self.args)
             last_body = nb
             kp_r, kp_l, k3r, k3l, rbox, lbox = per.get(self.hand_cam,
                                                        (None,) * 6)
@@ -530,15 +541,17 @@ class HandWorker(threading.Thread):
                 if out[1] is not None:
                     kp2d_views[v, 21:] = out[1]
             X_r = X_l = None
+            t1 = time.perf_counter()
             if len(self.views) >= 2:
                 X_r = triangulate_with_reproj(kp2d_views[:, :21], Ks, Ds, Rs,
                                               Ts, self.args.hand_reproj_thr)
                 X_l = triangulate_with_reproj(kp2d_views[:, 21:], Ks, Ds, Rs,
                                               Ts, self.args.hand_reproj_thr)
+            tms["tri_ms"] = (time.perf_counter() - t1) * 1e3
             ms = (time.perf_counter() - t0) * 1e3
             with self._lock:
                 self.result = {"kp_r": kp_r, "kp_l": kp_l,
-                               "k3r": k3r, "k3l": k3l, "ms": ms,
+                               "k3r": k3r, "k3l": k3l, "ms": ms, "tms": tms,
                                "rbox": rbox, "lbox": lbox,
                                "X_r": X_r, "X_l": X_l,
                                "kp2d_views": kp2d_views,
@@ -920,6 +933,11 @@ def main():
                     nr = int(np.isfinite(hres["X_r"]).all(1).sum())
                     nl = int(np.isfinite(hres["X_l"]).all(1).sum())
                     st = f", stereo hand jts R {nr}/21 L {nl}/21"
+                if hres is not None and hres.get("tms"):
+                    t = hres["tms"]
+                    st += (f" [hand: prep {t['prep_ms']:.0f} + fwd "
+                           f"{t['fwd_ms']:.0f} + post {t['post_ms']:.0f} + "
+                           f"tri {t.get('tri_ms', 0):.0f} ms]")
                 print(f"  body {ema or 0:4.1f} Hz  (total {res['ms']:.0f} ms: "
                       f"yolo {res['yolo_ms']:.0f} + nlf {res['nlf_ms']:.0f}, "
                       f"hands {hres['ms'] if hres else 0:.0f} ms, "
