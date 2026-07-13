@@ -52,6 +52,10 @@ parser.add_argument("--exposure", type=float, default=None,
                          "typically 3..2047; overrides --auto-exposure)")
 parser.add_argument("--gain", type=float, default=None,
                     help="manual gain for BOTH cameras (with --exposure)")
+parser.add_argument("--rotate180", action="store_true",
+                    help="Rotate both camera frames 180° (upside-down mounted "
+                         "cameras). Lossless. The demo MUST then run with the "
+                         "same flag (intrinsics are for the rotated image).")
 args = parser.parse_args()
 
 board, dictionary = board_config.make_board()
@@ -176,6 +180,9 @@ while True:
     if not ret0 or not ret1:
         print("Camera read failed.")
         break
+    if args.rotate180:
+        frame0 = cv2.rotate(frame0, cv2.ROTATE_180)
+        frame1 = cv2.rotate(frame1, cv2.ROTATE_180)
 
     gray0 = cv2.cvtColor(frame0, cv2.COLOR_BGR2GRAY)
     gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)

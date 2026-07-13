@@ -226,8 +226,9 @@ _STOP = threading.Event()
 class CamThread(threading.Thread):
     """Grab continuously; keep only the latest frame (+ wall-clock timestamp)."""
 
-    def __init__(self, index, width, height):
+    def __init__(self, index, width, height, rotate180=False):
         super().__init__(daemon=True)
+        self.rotate180 = rotate180  # must match how the calibration was captured
         self.cap = cv2.VideoCapture(index)
         if not self.cap.isOpened():
             raise SystemExit(f"cannot open camera {index}")
@@ -253,6 +254,8 @@ class CamThread(threading.Thread):
             if not ok:
                 time.sleep(0.005)
                 continue
+            if self.rotate180:
+                f = cv2.rotate(f, cv2.ROTATE_180)
             now = time.time()
             if t_prev is not None and now > t_prev:
                 inst = 1.0 / (now - t_prev)
@@ -555,6 +558,10 @@ def main():
     p.add_argument("--checkpoint_dir", default="./checkpoints/sam-3d-body-dinov3")
     p.add_argument("--cap-width", type=int, default=1280)
     p.add_argument("--cap-height", type=int, default=720)
+    p.add_argument("--rotate180", action="store_true",
+                   help="Rotate every camera frame 180° (upside-down mounted "
+                        "cameras). Lossless. The calibration MUST have been "
+                        "captured with the same flag.")
     p.add_argument("--det-thr", type=float, default=0.3,
                    help="per-marker score threshold for triangulation/drawing")
     p.add_argument("--rtcosmik", default="~/code/RT-COSMIK",
@@ -630,7 +637,8 @@ def main():
     R_world_handcam = Rs[args.hand_cam].T          # cam→world (world = cam0 frame)
 
     print("[3/4] Cameras + workers (NLF warmup ~10 s)...")
-    cams = [CamThread(i, args.cap_width, args.cap_height) for i in cam_idx]
+    cams = [CamThread(i, args.cap_width, args.cap_height,
+                      rotate180=args.rotate180) for i in cam_idx]
     for c in cams:
         c.start()
     body = BodyWorker(cams, Ks, Ds, Rs, Ts, args.det_thr, args)
