@@ -410,7 +410,9 @@ class HandMPC:
         so.nlp_solver_max_iter = 10
         so.tol = 1e-4
         so.ext_fun_compile_flags = os.environ.get("ACADOS_EXT_FUN_COMPILE_FLAGS", "-O1")
-        self.solver = AcadosOcpSolver(ocp)
+        # name-derived json so a second solver (the Manus ghost) doesn't share
+        # the default acados_ocp_nlp.json with the primary
+        self.solver = AcadosOcpSolver(ocp, json_file=f"acados_ocp_{am.name}.json")
 
         if self.col_pairs:                     # sanity: must be feasible at rest
             data = model.createData()
