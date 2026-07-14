@@ -30,6 +30,15 @@ Run (acados env; pip install viser yourdfpy):
   python retarget_mpc.py --replay ../output_cosmik_demo/<ts>/goliath70_3d.npy
   python retarget_mpc.py --listen localhost:8092     # live
 Viser UI: http://localhost:8080
+
+Manus accuracy comparison (Task): overlay a transparent-red GHOST hand
+retargeted from a Manus glove on top of the SAM3D one, and dump a per-joint
+angle-comparison graph on exit. The glove feed comes from manus_bridge.py
+(reads sharpa-manus-sdk, emits the same TCP format):
+  python retarget_mpc.py --hand sharpa --listen localhost:8092 \
+      --manus-listen localhost:8095            # glove 21 kp → SAME MPC (fair)
+  python retarget_mpc.py --hand sharpa --listen localhost:8092 \
+      --manus-listen localhost:8095 --manus-mode angles   # SDK angles, no MPC
 """
 
 import argparse
@@ -291,7 +300,8 @@ class PalmMapper:
 
 class HandMPC:
     def __init__(self, cfg, model, static_track, w_tip, N=8, dt=0.04,
-                 w_dq=1e-3, w_u=1e-4, self_collision=True, col_margin=0.0):
+                 w_dq=1e-3, w_u=1e-4, self_collision=True, col_margin=0.0,
+                 name_suffix=""):
         import casadi
         import pinocchio.casadi as cpin
         from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
@@ -323,7 +333,8 @@ class HandMPC:
         markers = casadi.vertcat(*exprs)
 
         am = AcadosModel()
-        am.name = f"{cfg.name}_hand_mpc"      # per-hand acados codegen dir
+        am.name = f"{cfg.name}_hand_mpc{name_suffix}"   # per-hand codegen dir
+                                              # (ghost gets its own to coexist)
         am.x, am.u = cx, cu
         am.disc_dyn_expr = x_next
         am.cost_y_expr = casadi.vertcat(markers, cdq, cu)
@@ -532,21 +543,66 @@ class ViserViz:
             h.position = 0.5 * (data.oMf[self.model.getFrameId(fa)].translation
                                 + data.oMf[self.model.getFrameId(fb)].translation)
 
+    def add_ghost(self, urdf_path, color=(0.9, 0.15, 0.15), opacity=0.45):
+        """A second copy of the hand (transparent red) overlaid on the SAM3D
+        one — the Manus-glove retarget, for side-by-side comparison. Recolour/
+        opacity APIs differ across viser versions, so this is all best-effort:
+        a viz nicety must never crash the comparison."""
+        from viser.extras import ViserUrdf
+        try:
+            self.ghost = ViserUrdf(self.server, Path(urdf_path),
+                                   root_node_name="/ghost",
+                                   mesh_color_override=color)
+        except TypeError:
+            self.ghost = ViserUrdf(self.server, Path(urdf_path),
+                                   root_node_name="/ghost")
+        try:
+            meshes = (getattr(self.ghost, "_meshes", None)
+                      or getattr(self.ghost, "_mesh_handles", []))
+            for h in (meshes.values() if isinstance(meshes, dict) else meshes):
+                for attr, val in (("opacity", opacity), ("color", color)):
+                    if hasattr(h, attr):
+                        try:
+                            setattr(h, attr, val)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        self._ghost_idx = [
+            (self.model.joints[self.model.getJointId(n)].idx_q
+             if self.model.existJointName(n) else -1)
+            for n in self.ghost.get_actuated_joint_names()]
+        print("  ghost (Manus) hand added — transparent red")
+        return self.ghost
+
+    def set_ghost_q(self, q):
+        if getattr(self, "ghost", None) is None:
+            return
+        cfg = np.zeros(len(self._ghost_idx))
+        for i, idx in enumerate(self._ghost_idx):
+            if idx >= 0:
+                cfg[i] = q[idx]
+        self.ghost.update_cfg(cfg)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # INPUT SOURCES
 # ═══════════════════════════════════════════════════════════════════════════
 
-_RX = {"kp": None, "n": 0}
-_MSG = 4 + 21 * 3 * 4
+_MSG = 4 + 21 * 3 * 4                        # SAM3D 21x3 float32 payload
+_RX = {"data": None, "n": 0}                 # primary (SAM3D) keypoint stream
+_MANUS = {"data": None, "n": 0}              # optional Manus-glove ghost stream
 
 
-def _rx_thread(host, port):
+def _rx_loop(host, port, slot, msg_size, parse, tag=""):
+    """Generic latest-value TCP receiver. Writes slot['data'] BEFORE slot['n']
+    so a reader keying off 'n' always gets the matching payload (no 1-frame
+    skew) — same discipline the primary stream always used."""
     while True:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.connect((host, port))
-            print(f"  connected to {host}:{port}")
+            print(f"  connected to {host}:{port}{tag}")
             buf = b""
             while True:
                 d = s.recv(65536)
@@ -554,16 +610,35 @@ def _rx_thread(host, port):
                     raise ConnectionError
                 buf += d
                 msg = None
-                while len(buf) >= _MSG:
-                    msg = buf[:_MSG]
-                    buf = buf[_MSG:]
+                while len(buf) >= msg_size:
+                    msg = buf[:msg_size]
+                    buf = buf[msg_size:]
                 if msg is not None:
-                    # write kp BEFORE n: readers key off n, so this guarantees a
-                    # fresh n is always paired with its matching kp (no 1-frame skew)
-                    _RX["kp"] = np.frombuffer(msg[4:], np.float32).reshape(21, 3).copy()
-                    _RX["n"] = struct.unpack(">I", msg[:4])[0]
+                    slot["data"] = parse(msg)
+                    slot["n"] = struct.unpack(">I", msg[:4])[0]
         except OSError:
             time.sleep(1.0)
+
+
+def _parse_kp(msg):
+    return np.frombuffer(msg[4:], np.float32).reshape(21, 3).copy()
+
+
+def _rx_thread(host, port):                  # primary SAM3D stream
+    _rx_loop(host, port, _RX, _MSG, _parse_kp)
+
+
+def manus_rx_thread(host, port, mode, n_sdk):
+    """Manus ghost stream. mode='kp' → 21x3 keypoints (same format as SAM3D,
+    fed to the SAME MPC); mode='angles' → n_sdk float32 Sharpa-SDK joint
+    angles (what sharpa-manus-sdk already outputs), applied to the ghost URDF
+    directly (no MPC — the fast path)."""
+    if mode == "kp":
+        _rx_loop(host, port, _MANUS, _MSG, _parse_kp, " (manus kp)")
+    else:
+        msg_q = 4 + n_sdk * 4
+        _rx_loop(host, port, _MANUS, msg_q,
+                 lambda m: np.frombuffer(m[4:], "<f4").copy(), " (manus angles)")
 
 
 def replay_frames(path, hand="right"):
@@ -571,6 +646,99 @@ def replay_frames(path, hand="right"):
     sl = slice(21, 42) if hand == "right" else slice(42, 63)
     for f in range(len(g)):
         yield g[f, sl] - g[f, sl][20]
+
+
+def manus_replay_frames(path, mode):
+    """Offline Manus stream for testing: (T,21,3) keypoints (mode='kp', wrist
+    re-anchored) or (T,n_sdk) SDK joint angles (mode='angles')."""
+    a = np.load(path)
+    for f in range(len(a)):
+        yield (a[f] - a[f][20]) if mode == "kp" else a[f]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SAM3D vs MANUS COMPARISON — joint mapping, live stats, offline graph
+# ═══════════════════════════════════════════════════════════════════════════
+
+def build_sdk_to_q(cfg, model):
+    """Map the Sharpa-SDK joint vector (cfg.publish_order = URDF joint names in
+    SDK index order) to pinocchio configuration indices. Returns a list idx_q
+    where idx_q[i] is the q-index for SDK joint i, or -1 if absent from the
+    (possibly wrist-reduced) model."""
+    if not cfg.publish_order:
+        raise SystemExit(f"--manus-mode angles needs a hand with a known SDK "
+                         f"joint order; {cfg.name} has none (use --manus-mode kp)")
+    idx_q = []
+    for name in cfg.publish_order:
+        if model.existJointName(name):
+            idx_q.append(model.joints[model.getJointId(name)].idx_q)
+        else:
+            idx_q.append(-1)
+    return idx_q
+
+
+def sdk_angles_to_q(model, idx_q, angles):
+    """Sharpa-SDK joint angles → pinocchio q (neutral for any absent joint)."""
+    q = pin.neutral(model)
+    for i, iq in enumerate(idx_q):
+        if iq >= 0 and i < len(angles) and np.isfinite(angles[i]):
+            q[iq] = angles[i]
+    return q
+
+
+def angle_diff_stats(q_a, q_b):
+    """(mean, max) absolute per-joint difference in DEGREES."""
+    d = np.abs(np.asarray(q_a) - np.asarray(q_b)) * 180.0 / np.pi
+    return float(d.mean()), float(d.max())
+
+
+def plot_angle_comparison(joint_names, log_sam, log_manus, out_png, csv_path=""):
+    """Offline figure: per-joint SAM3D vs Manus retargeted angle over time, plus
+    a per-joint RMS-difference summary. log_* are (T, nq) arrays (deg)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    A = np.asarray(log_sam, float) * 180.0 / np.pi
+    B = np.asarray(log_manus, float) * 180.0 / np.pi
+    T, nq = A.shape
+    both = np.isfinite(A).all(1) & np.isfinite(B).all(1)
+    rms = np.full(nq, np.nan)
+    if both.any():
+        rms = np.sqrt(np.nanmean((A[both] - B[both]) ** 2, axis=0))
+
+    if csv_path:
+        hdr = ",".join([f"{n}_sam" for n in joint_names]
+                       + [f"{n}_manus" for n in joint_names])
+        np.savetxt(csv_path, np.hstack([A, B]), delimiter=",", header=hdr,
+                   comments="")
+        print(f"  saved angle trajectories → {csv_path}")
+
+    cols = 4
+    rows = int(np.ceil((nq + 1) / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 2.2 * rows),
+                             squeeze=False)
+    t = np.arange(T)
+    for j in range(nq):
+        ax = axes[j // cols][j % cols]
+        ax.plot(t, A[:, j], lw=1.0, color="#1f77b4", label="SAM3D")
+        ax.plot(t, B[:, j], lw=1.0, color="#d62728", alpha=0.8, label="Manus")
+        ax.set_title(f"{joint_names[j]}  (rms {rms[j]:.1f}°)", fontsize=8)
+        ax.tick_params(labelsize=6)
+        if j == 0:
+            ax.legend(fontsize=6)
+    # summary bar of per-joint RMS difference
+    ax = axes[nq // cols][nq % cols]
+    order = np.argsort(np.nan_to_num(rms))[::-1]
+    ax.barh([joint_names[k] for k in order], rms[order], color="#555")
+    ax.set_title(f"per-joint RMS diff (deg), mean {np.nanmean(rms):.1f}", fontsize=8)
+    ax.tick_params(labelsize=6)
+    for k in range(nq + 1, rows * cols):                 # hide unused axes
+        axes[k // cols][k % cols].axis("off")
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=130)
+    print(f"  saved angle comparison → {out_png}  (mean RMS "
+          f"{np.nanmean(rms):.1f} deg over {int(both.sum())} paired frames)")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -606,6 +774,22 @@ def main():
     p.add_argument("--viser-port", type=int, default=8080)
     p.add_argument("--replay-fps", type=float, default=25.0)
     p.add_argument("--save-q", default="", help="save the joint trajectory to CSV")
+    # ── Manus-glove comparison ghost ──
+    p.add_argument("--manus-listen", default="",
+                   help="host:port of the Manus bridge (manus_bridge.py). Adds a "
+                        "transparent-red GHOST hand retargeted from the glove, "
+                        "overlaid on the SAM3D hand, for accuracy comparison")
+    p.add_argument("--manus-replay", default="",
+                   help="offline Manus stream (.npy): (T,21,3) keypoints for "
+                        "--manus-mode kp, or (T,n_sdk) SDK joint angles for "
+                        "--manus-mode angles")
+    p.add_argument("--manus-mode", choices=["kp", "angles"], default="kp",
+                   help="kp: Manus 21 keypoints through the SAME MPC as SAM3D "
+                        "(fair pipeline comparison, default); angles: Sharpa-SDK "
+                        "joint angles applied straight to the ghost (fast, no MPC)")
+    p.add_argument("--compare-out", default="",
+                   help="output dir for the offline angle-comparison graph + CSV "
+                        "(default: next to --save-q, else ./compare_out)")
     args = p.parse_args()
     cfg = HANDS[args.hand]
     urdf = args.urdf or cfg.urdf
@@ -645,6 +829,39 @@ def main():
                   col_margin=args.col_margin)
     mpc.warm_start(q)
 
+    # ── Manus comparison ghost: a second retarget of the same hand from the
+    # glove, overlaid transparent-red. kp mode reuses the SAME MPC (fair
+    # pipeline comparison); angles mode drives the URDF straight from the
+    # Sharpa-SDK joint vector (fast). ──
+    compare = bool(args.manus_listen or args.manus_replay)
+    ghost_mpc = mapper_ghost = sdk_idx = manus_iter = diff_gui = None
+    sam_log, manus_log = [], []
+    if compare:
+        print(f"[+] Manus ghost ({args.manus_mode})...")
+        viz.add_ghost(urdf)
+        if args.manus_mode == "kp":
+            mapper_ghost = PalmMapper(cfg, model,
+                                      float(np.linalg.norm(offsets["middle"])))
+            ghost_mpc = HandMPC(cfg, model, static_track, args.w_tip, N=args.N,
+                                dt=args.dt, w_dq=args.w_dq, w_u=args.w_u,
+                                self_collision=not args.no_self_collision,
+                                col_margin=args.col_margin, name_suffix="_ghost")
+            ghost_mpc.warm_start(q)
+        else:
+            sdk_idx = build_sdk_to_q(cfg, model)
+        if args.manus_listen:
+            mh, mp = args.manus_listen.rsplit(":", 1)
+            threading.Thread(target=manus_rx_thread,
+                             args=(mh, int(mp), args.manus_mode,
+                                   len(cfg.publish_order or ())),
+                             daemon=True).start()
+        else:
+            manus_iter = manus_replay_frames(args.manus_replay, args.manus_mode)
+        try:
+            diff_gui = viz.server.gui.add_text("SAM3D vs Manus |dq| (deg)", "waiting")
+        except Exception:
+            diff_gui = None
+
     print("[4/4] Running — Ctrl+C to stop.")
     if args.listen:
         host, port = args.listen.rsplit(":", 1)
@@ -662,11 +879,11 @@ def main():
                     break
                 time.sleep(1.0 / args.replay_fps)
             else:
-                if _RX["kp"] is None or _RX["n"] == last_n:
+                if _RX["data"] is None or _RX["n"] == last_n:
                     time.sleep(0.002)
                     continue
                 last_n = _RX["n"]
-                kp = _RX["kp"]
+                kp = _RX["data"]
 
             targets_full = mapper(kp)
             if targets_full is None:
@@ -685,6 +902,35 @@ def main():
             pin.updateFramePlacements(model, data)
             viz.update_spheres(data, tip_targets)
 
+            # ── Manus ghost: retarget the glove input and overlay it ──
+            if compare:
+                if manus_iter is not None:
+                    md = next(manus_iter, None)
+                else:
+                    md = _MANUS["data"]
+                q_m = None
+                if md is not None:
+                    if args.manus_mode == "kp":
+                        tf = mapper_ghost(md)
+                        if tf is not None:
+                            q_m = ghost_mpc.solve(
+                                np.array([tf[_FINGER_BASE[f]] for f in FINGERS]),
+                                np.array([tf[i] for _, i, _ in static_track]),
+                                offsets_flat)
+                    else:
+                        q_m = sdk_angles_to_q(model, sdk_idx, md)
+                    if q_m is not None:
+                        viz.set_ghost_q(q_m)
+                sam_log.append(np.asarray(q).copy())
+                manus_log.append(np.asarray(q_m).copy() if q_m is not None
+                                 else np.full(model.nq, np.nan))
+                if diff_gui is not None and q_m is not None and len(sam_log) % 5 == 0:
+                    mean_d, max_d = angle_diff_stats(q, q_m)
+                    try:
+                        diff_gui.value = f"mean {mean_d:.1f}  max {max_d:.1f}"
+                    except Exception:
+                        pass
+
             if len(q_log) % 50 == 0:
                 st = np.array(t_solve[-50:])
                 per = []
@@ -702,6 +948,14 @@ def main():
                 print(f"  {len(q_log)} solves | {1e3*st.mean():.1f} ms/solve | "
                       f"tip err mm: mean {1e3*np.mean([e for _, e in per]):.1f} "
                       f"[{detail}]{col}", flush=True)
+                if compare and manus_log:
+                    sl = np.array(sam_log[-50:])
+                    ml = np.array(manus_log[-50:])
+                    m = np.isfinite(sl).all(1) & np.isfinite(ml).all(1)
+                    if m.any():
+                        dd = np.abs(sl[m] - ml[m]).mean() * 180 / np.pi
+                        print(f"    Manus ghost: mean |dq| {dd:.1f} deg "
+                              f"({int(m.sum())}/{len(m)} frames paired)", flush=True)
     except KeyboardInterrupt:
         pass
 
@@ -709,6 +963,16 @@ def main():
         np.savetxt(args.save_q, np.asarray(q_log), delimiter=",",
                    header=",".join(model.names[1:]), comments="")
         print(f"  saved {len(q_log)} configurations → {args.save_q}")
+
+    if compare and sam_log:
+        outd = (args.compare_out
+                or (os.path.dirname(args.save_q) if args.save_q else "")
+                or "compare_out")
+        os.makedirs(outd, exist_ok=True)
+        plot_angle_comparison(
+            list(model.names[1:]), sam_log, manus_log,
+            os.path.join(outd, "angle_comparison.png"),
+            os.path.join(outd, "angle_comparison.csv"))
     print("  final tip offsets (m):")
     for f in FINGERS:
         o = offsets[f]
