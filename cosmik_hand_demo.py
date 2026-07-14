@@ -795,6 +795,59 @@ def draw_markers(img, kp, sc, thr):
     return img
 
 
+# ── hand skeleton (SAM3D 21-kp order: per finger [tip, DIP, PIP, MCP], wrist=20) ──
+_HAND_FINGERS = [(0, 1, 2, 3), (4, 5, 6, 7), (8, 9, 10, 11),
+                 (12, 13, 14, 15), (16, 17, 18, 19)]
+_HAND_WRIST = 20
+# per-finger colour (BGR): thumb, index, middle, ring, pinky
+_HAND_FCOL = [(0, 128, 255), (255, 153, 255), (255, 178, 102),
+              (51, 51, 255), (0, 255, 0)]
+
+
+def draw_hand_skeleton(img, pts21, colors=_HAND_FCOL, line_w=2, joint_r=3,
+                       tip_r=5, hollow=False):
+    """Draw a 21-keypoint hand skeleton — per-finger coloured bones + joints,
+    fingertip and wrist emphasised. hollow=True draws ring markers and thin
+    bones, used to overlay the reprojected metric-3D hand distinctly from the
+    solid raw 2D detection (their divergence = triangulation error)."""
+    for (tip, j3, j2, mcp), col in zip(_HAND_FINGERS, colors):
+        chain = [_HAND_WRIST, mcp, j2, j3, tip]
+        for a, b in zip(chain[:-1], chain[1:]):
+            pa, pb = pts21[a], pts21[b]
+            if np.isfinite(pa).all() and np.isfinite(pb).all():
+                cv2.line(img, tuple(pa.astype(int)), tuple(pb.astype(int)),
+                         col, line_w, cv2.LINE_AA)
+    for (tip, j3, j2, mcp), col in zip(_HAND_FINGERS, colors):
+        for j in (mcp, j2, j3):
+            p = pts21[j]
+            if np.isfinite(p).all():
+                cv2.circle(img, tuple(p.astype(int)), joint_r,
+                           col if hollow else (255, 255, 255),
+                           1 if hollow else -1, cv2.LINE_AA)
+        p = pts21[tip]                                    # fingertip emphasised
+        if np.isfinite(p).all():
+            cv2.circle(img, tuple(p.astype(int)), tip_r, col,
+                       1 if hollow else -1, cv2.LINE_AA)
+    w = pts21[_HAND_WRIST]
+    if np.isfinite(w).all():
+        cv2.circle(img, tuple(w.astype(int)), joint_r + 1, (0, 255, 255),
+                   1 if hollow else -1, cv2.LINE_AA)
+    return img
+
+
+def reproject_points(pts3d, K, D, R, T):
+    """Project (N,3) world/cam0 points into one view → (N,2) pixels, NaN-safe
+    (NaN inputs stay NaN, so a partially-occluded hand still reprojects)."""
+    out = np.full((len(pts3d), 2), np.nan, np.float32)
+    v = np.isfinite(pts3d).all(1)
+    if v.any():
+        rvec, _ = cv2.Rodrigues(R)
+        proj, _ = cv2.projectPoints(pts3d[v].astype(np.float64).reshape(-1, 1, 3),
+                                    rvec, T.reshape(3, 1), K, D)
+        out[v] = proj.reshape(-1, 2).astype(np.float32)
+    return out
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════
@@ -869,6 +922,12 @@ def main():
                    help="box floor = this x projected shoulder width (matters "
                         "when the forearm points at the camera)")
     p.add_argument("--hand-res", type=int, default=0)
+    p.add_argument("--no-reproj-hands", dest="reproj_hands", action="store_false",
+                   help="don't overlay the fused metric-3D hand reprojected "
+                        "into each view (hollow skeleton; on by default when "
+                        "calibrated — a retargeting-quality check: the hollow "
+                        "3D skeleton should sit on top of the solid detection)")
+    p.set_defaults(reproj_hands=True)
     p.add_argument("--rerun-mode", choices=["web", "native", "save"], default="web")
     p.add_argument("--rerun-grpc-port", type=int, default=9876)
     p.add_argument("--rerun-web-port", type=int, default=9090)
@@ -994,17 +1053,26 @@ def main():
                     x, y, w, h = pb.astype(int)
                     cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 120), 2)
                 if hres is not None and i in hres["views"]:
-                    from body_hand_decoder_extractor import _draw_hand
                     vkr, vkl, vrb, vlb = hres["views"][i]
-                    if vkr is not None:
-                        img = _draw_hand(img, vkr)
+                    if vkr is not None:                  # raw 2D detection
+                        img = draw_hand_skeleton(img, vkr)
                     if vkl is not None:
-                        img = _draw_hand(img, vkl)
+                        img = draw_hand_skeleton(img, vkl)
                     for box in (vrb, vlb):
                         if box is not None and np.isfinite(box).all():
                             cv2.rectangle(img, tuple(box[:2].astype(int)),
                                           tuple(box[2:].astype(int)),
                                           (255, 170, 80), 2)
+                # reproject the fused metric-3D hand (what actually drives the
+                # robot) — hollow skeleton, to compare against the solid raw
+                # detection: any divergence is triangulation/fusion error
+                if args.reproj_hands and ncam >= 2:
+                    for sl in (slice(21, 42), slice(42, 63)):
+                        rp = reproject_points(g70[sl], Ks[i], Ds[i], Rs[i], Ts[i])
+                        img = draw_hand_skeleton(img, rp, hollow=True, line_w=1)
+                    cv2.putText(img, "hand: solid=2D detect  hollow=3D reproj",
+                                (14, img.shape[0] - 16), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.6, (255, 255, 255), 2, cv2.LINE_AA)
                 overlays.append(img)
 
             dt = (t_wall - t_prev) if t_prev else None
