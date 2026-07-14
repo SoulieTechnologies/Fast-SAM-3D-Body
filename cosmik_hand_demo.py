@@ -848,6 +848,25 @@ def reproject_points(pts3d, K, D, R, T):
     return out
 
 
+def _full_to_tile(pts, box, out_hw, padding=0.9, aspect=0.75):
+    """Map full-image (N,2) pixels into the decoder's hand-crop TILE pixels,
+    inverting the crop transform of _prepare_hand_batches_gpu (padding 0.9,
+    aspect fixed to a square of side crop_size around the box centre). Used to
+    draw the detected hand skeleton onto the 'Hand crops' panel tiles. NaN-safe.
+    For the LEFT hand this also gives the DISPLAYED (un-flipped) tile coords:
+    the flip cancels out when the box centre is the original one (verified)."""
+    x1, y1, x2, y2 = (float(v) for v in box)
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    w, h = (x2 - x1) * padding, (y2 - y1) * padding
+    sw, sh = (w, w / aspect) if w > h * aspect else (h * aspect, h)
+    cs = max(sw, sh)
+    out_h, out_w = out_hw
+    tile = np.full_like(np.asarray(pts, np.float32), np.nan)
+    tile[:, 0] = (pts[:, 0] - cx + cs / 2) * out_w / cs
+    tile[:, 1] = (pts[:, 1] - cy + cs / 2) * out_h / cs
+    return tile
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1085,16 +1104,24 @@ def main():
                         (14, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
 
             # strip of the decoder's actual input tiles: [v0 R | v0 L | v1 R ...]
+            # with the detected 21-kp hand skeleton drawn ON each tile (the 2D
+            # keypoints mapped into tile coords), to judge the fit up close
             crop_strip = None
             if hres is not None and hres.get("crops"):
                 tiles = []
                 for v in sorted(hres["crops"]):
-                    for tile, lab in zip(hres["crops"][v], ("R", "L")):
-                        tile = tile.copy()
+                    vw = hres["views"].get(v, (None, None, None, None))
+                    kps, boxes = (vw[0], vw[1]), (vw[2], vw[3])
+                    for ti, (tile, lab) in enumerate(zip(hres["crops"][v], ("R", "L"))):
+                        tile = cv2.cvtColor(tile, cv2.COLOR_RGB2BGR)   # draw in BGR
+                        kp, box = kps[ti], boxes[ti]
+                        if kp is not None and box is not None and np.isfinite(box).all():
+                            tp = _full_to_tile(kp, box, tile.shape[:2])
+                            draw_hand_skeleton(tile, tp, line_w=1, joint_r=2, tip_r=3)
                         cv2.putText(tile, f"cam{v} {lab}", (6, 24),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                                    (255, 255, 0), 2, cv2.LINE_AA)
-                        tiles.append(tile)
+                                    (0, 255, 255), 2, cv2.LINE_AA)
+                        tiles.append(cv2.cvtColor(tile, cv2.COLOR_BGR2RGB))
                 crop_strip = cv2.hconcat(tiles)
                 if crop_strip.shape[0] > 256:         # bandwidth: cap at 256 tall
                     s = 256.0 / crop_strip.shape[0]
