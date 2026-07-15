@@ -68,7 +68,8 @@ python body_hand_decoder_extractor.py \
 
 | Script | What it does |
 |---|---|
-| `body_hand_decoder_extractor.py` | **The 14.6 FPS pipeline** — YOLO body + dedicated hand decoder |
+| `cosmik_hand_demo.py` | **The live multi-camera pipeline** — NLF anatomical markers (metric 3D via N-cam triangulation) + SAM hand decoder, stereo-triangulated hands with per-hand best-view selection on 3-4 cameras (`--hand-topk`), Rerun UI, TCP hand emit for the teleop MPC. See its docstring for the full run recipes |
+| `body_hand_decoder_extractor.py` | **The 14.6 FPS mono pipeline** — YOLO body + dedicated hand decoder |
 | `build_backbone_256.py` | Builds the 256² TRT FP16 backbone engine used above |
 | `extract_two_cameras.py` | Two-camera triangulation → metric 3D (removes monocular scale ambiguity). Single-GPU, B2 hand refinement, full mono outputs — the reference version |
 | `extract_dualgpu.py` | Same triangulation, one view per GPU in true parallel (~2x faster, **needs 2 GPUs**; body-only, no B2 hands) |
