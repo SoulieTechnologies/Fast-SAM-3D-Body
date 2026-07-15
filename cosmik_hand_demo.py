@@ -284,7 +284,8 @@ _STOP = threading.Event()
 class CamThread(threading.Thread):
     """Grab continuously; keep only the latest frame (+ wall-clock timestamp)."""
 
-    def __init__(self, index, width, height, rotate180=False):
+    def __init__(self, index, width, height, rotate180=False,
+                 lock_focus=False, focus=None):
         super().__init__(daemon=True)
         self.rotate180 = rotate180  # must match how the calibration was captured
         self.cap = cv2.VideoCapture(index)
@@ -295,12 +296,23 @@ class CamThread(threading.Thread):
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
+        foc = ""
+        if lock_focus or focus is not None:
+            # autofocus shifts the effective focal length (focus breathing):
+            # the calibrated K drifts with every refocus. Lock it — at the
+            # SAME value the calibration was captured with (like --rotate180).
+            # No-op on fixed-focus cameras (driver rejects the property).
+            self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+            if focus is not None:
+                self.cap.set(cv2.CAP_PROP_FOCUS, focus)
+            foc = (f" focus={self.cap.get(cv2.CAP_PROP_FOCUS):g}"
+                   f" af={self.cap.get(cv2.CAP_PROP_AUTOFOCUS):g}")
         w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fcc = int(self.cap.get(cv2.CAP_PROP_FOURCC))
         fcc_s = "".join(chr((fcc >> (8 * i)) & 0xFF) for i in range(4))
         print(f"  cam {index}: {w}x{h} fourcc={fcc_s} "
-              f"(nominal {self.cap.get(cv2.CAP_PROP_FPS):.0f} fps)")
+              f"(nominal {self.cap.get(cv2.CAP_PROP_FPS):.0f} fps){foc}")
         self.frame, self.ts, self.n = None, 0.0, 0
         self.fps = 0.0                 # MEASURED capture rate (EMA)
         self._lock = threading.Lock()
@@ -1015,6 +1027,17 @@ def main():
                    help="Rotate every camera frame 180° (upside-down mounted "
                         "cameras). Lossless. The calibration MUST have been "
                         "captured with the same flag.")
+    p.add_argument("--lock-focus", action="store_true",
+                   help="disable autofocus on every camera (no-op on fixed-"
+                        "focus models). REQUIRED with any autofocus camera: "
+                        "refocusing shifts the effective focal length, so "
+                        "the calibrated K drifts. The calibration must be "
+                        "captured with the same lock (capture_calibration_"
+                        "multi --lock-focus/--focus)")
+    p.add_argument("--focus", type=float, default=None,
+                   help="fixed manual focus value (V4L2 units, typically "
+                        "0-255 — probe with v4l2-ctl). Implies --lock-focus; "
+                        "use the SAME value as during calibration")
     p.add_argument("--det-thr", type=float, default=0.3,
                    help="per-marker score threshold for triangulation/drawing")
     p.add_argument("--mono-hands", action="store_true",
@@ -1140,7 +1163,8 @@ def main():
 
     print("[3/4] Cameras + workers (NLF warmup ~10 s)...")
     cams = [CamThread(i, args.cap_width, args.cap_height,
-                      rotate180=args.rotate180) for i in cam_idx]
+                      rotate180=args.rotate180, lock_focus=args.lock_focus,
+                      focus=args.focus) for i in cam_idx]
     for c in cams:
         c.start()
     body = BodyWorker(cams, Ks, Ds, Rs, Ts, args.det_thr, args)

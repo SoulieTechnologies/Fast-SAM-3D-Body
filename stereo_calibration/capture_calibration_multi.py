@@ -46,6 +46,15 @@ ap.add_argument("--min_corners", type=int, default=6)
 ap.add_argument("--width", type=int, default=1920)
 ap.add_argument("--height", type=int, default=1080)
 ap.add_argument("--auto-exposure", action="store_true")
+ap.add_argument("--lock-focus", action="store_true",
+                help="disable autofocus on every camera (no-op on fixed-focus "
+                     "models). REQUIRED with an autofocus camera: refocusing "
+                     "shifts the effective focal length. The demo must then "
+                     "run with the same --lock-focus/--focus")
+ap.add_argument("--focus", type=float, default=None,
+                help="fixed manual focus (V4L2 units, typically 0-255; "
+                     "implies --lock-focus). Pick it with the sharpness "
+                     "readout: corners N/88 + sharp value on the board")
 ap.add_argument("--exposure", type=float, default=None)
 ap.add_argument("--gain", type=float, default=None)
 ap.add_argument("--rotate180", action="store_true",
@@ -79,11 +88,19 @@ for c in cam_ids:
             cap.set(cv2.CAP_PROP_GAIN, args.gain)
     elif args.auto_exposure:
         cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+    if args.lock_focus or args.focus is not None:
+        # autofocus = focal length drift (focus breathing) → K would be wrong
+        cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+        if args.focus is not None:
+            cap.set(cv2.CAP_PROP_FOCUS, args.focus)
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     print(f"cam{c}: {w}x{h} auto_exp={cap.get(cv2.CAP_PROP_AUTO_EXPOSURE):g} "
           f"exposure={cap.get(cv2.CAP_PROP_EXPOSURE):g} "
-          f"gain={cap.get(cv2.CAP_PROP_GAIN):g}")
+          f"gain={cap.get(cv2.CAP_PROP_GAIN):g}"
+          + (f" focus={cap.get(cv2.CAP_PROP_FOCUS):g}"
+             f" af={cap.get(cv2.CAP_PROP_AUTOFOCUS):g}"
+             if (args.lock_focus or args.focus is not None) else ""))
     if w != args.width:
         print(f"  WARNING: cam{c} refused {args.width}x{args.height}")
     caps.append(cap)
