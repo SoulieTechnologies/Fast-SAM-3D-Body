@@ -13,19 +13,21 @@ pipeline later.
 Architecture (decoupled rates — the body never waits for the hands):
   capture thread per camera  → latest frame + timestamp (soft sync)
   body worker                → YOLO + NLF per view (batched) → triangulate 43×3 metric
-  hand worker                → SAM hand decoder on EVERY view's wrist crops,
-                               all views in ONE batched forward → hand
-                               keypoints STEREO-triangulated across views
-                               (metric scale, occlusion-robust; per-joint
-                               epipolar check, mono fallback; --mono-hands =
-                               old hand-cam-only behaviour)
+  hand worker                → SAM hand decoder on each hand's BEST K views
+                               (3+ cams, --hand-topk: crop size x palm-plane
+                               visibility x NLF conf, hysteresis; 2 cams =
+                               every view), all crops in ONE batched forward
+                               → hand keypoints STEREO-triangulated across
+                               views (metric scale, occlusion-robust;
+                               per-joint epipolar check, mono fallback;
+                               --mono-hands = old hand-cam-only behaviour)
   main loop      (body rate) → fuse (stereo hands, else fingers re-anchored at
                                the metric wrists), Rerun logging, recording
 
 Outputs (in --output_dir):
   markers_3d.npy      (T, 43, 3)       metric 3D, cam0/world frame (MARKER_NAMES order)
   markers_2d.npy      (T, ncam, 43, 2)
-  hands_2d.npy        (T, 42, 2)       hand-cam pixels (right 0-20, left 21-41)
+  hands_2d.npy        (T, 42, 2)       best-view pixels (right 0-20, left 21-41)
   hands_2d_views.npy  (T, ncam, 42, 2) decoder pixels per view (stereo input)
   goliath70_3d.npy    (T, 70, 3)       markers mapped to Goliath + fused fingers
   timestamps.npy      (T,)
@@ -78,6 +80,8 @@ from notebook.utils import setup_sam_3d_body
 # un-flipped) from the Rerun demo — nothing is modified there.
 from rerun_demo import (_H_WRIST, _hand_box_v2, _quiet, HAND_SRC,
                         L_ELBOW, L_WRIST, R_ELBOW, R_WRIST)
+from hand_view_select import (in_frame_fraction, palm_normal, select_views,
+                              view_visibility)
 from sam_3d_body.models.meta_arch.sam3d_body import _prepare_hand_batches_gpu
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -138,6 +142,12 @@ R_WRIST_PAIR = (_M["RWRI"], _M["RMWRI"])
 L_WRIST_PAIR = (_M["LWRI"], _M["LMWRI"])
 R_ELBOW_PAIR = (_M["RELB"], _M["RMELB"])
 L_ELBOW_PAIR = (_M["LELB"], _M["LMELB"])
+# palm-plane markers (thumb, pinky — with the wrist they span the palm) and
+# the per-view NLF scores that proxy hand occlusion, for best-view selection
+R_PALM = (_M["RTHU"], _M["RPIN"])
+L_PALM = (_M["LTHU"], _M["LPIN"])
+R_HAND_MARKERS = [_M[m] for m in ("RWRI", "RMWRI", "RTHU", "RMID", "RPIN")]
+L_HAND_MARKERS = [_M[m] for m in ("LWRI", "LMWRI", "LTHU", "LMID", "LPIN")]
 
 
 def _pair_mid(kp, a, b):
@@ -457,51 +467,63 @@ def _hand_box_view(k17, wrist_i, elbow_i, args, side_px=None):
     return np.array([cx - h, cy - h, cx + h, cy + h], np.float32)
 
 
-def _hand_decoder_step_views(model, frames, k17s, cam_ints, args, sides=None):
+def _hand_decoder_step_views(model, frames, k17s, cam_ints, args, sides=None,
+                             want=None):
     """rerun_demo._hand_decoder_step batched over views: ONE decoder forward.
 
     frames / k17s / cam_ints: dicts view → frame_bgr / (17,2) COCO pixels /
-    (1,3,3) torch K. Views are stacked on the BATCH dim — NOT on the person
-    dim like model._merge_hand_batches — because cam_int is one per batch
-    entry (expanded to persons in the hand path): each view keeps its own
-    intrinsics. Flattened person order is then [v0-L, v0-R, v1-L, v1-R, ...].
+    (1,3,3) torch K. want: {view: (run_right, run_left)} — which hands to
+    decode in each view (None = both, everywhere). Each selected (view, hand)
+    is ONE entry on the BATCH dim — flat, NOT persons-per-view like
+    model._merge_hand_batches — so the two hands can use DIFFERENT view
+    subsets (per-hand top-K selection) and each entry keeps its own view
+    intrinsics (cam_int is per batch entry, expanded to persons inside the
+    hand path). A view now also runs with a single available hand box
+    (previously both were required).
 
     Returns ({view: (kp_r21_2d, kp_l21_2d, k3_r21, k3_l21, rbox, lbox)}, tms,
     crops) — per view identical to _hand_decoder_step (3D in that view's
-    camera coords, left hand un-mirrored, NOT anchored); a view with a
-    missing hand box gets all-None keypoints. With a single view this
-    computes exactly what _hand_decoder_step does. tms = profiling breakdown
-    in ms: prep (cvtColor + GPU upload/crops), fwd (decoder forward,
-    CUDA-synced), post (GPU→CPU copies). crops = {view: (right_rgb,
-    left_rgb)} — the decoder's ACTUAL input tiles (left un-flipped back for
-    display), for judging crop tracking and --hand-res quality.
+    camera coords, left hand un-mirrored, NOT anchored); non-decoded hands
+    are None. With a single view and both hands this computes exactly what
+    _hand_decoder_step does. tms = profiling breakdown in ms: prep (cvtColor
+    + GPU upload/crops), fwd (decoder forward, CUDA-synced), post (GPU→CPU
+    copies). crops = {view: [right_rgb | None, left_rgb | None]} — the
+    decoder's ACTUAL input tiles (left un-flipped back for display), for
+    judging crop tracking and --hand-res quality.
     """
     out_hw = ((args.hand_res, args.hand_res) if args.hand_res > 0
               else (model.cfg.MODEL.IMAGE_SIZE[1], model.cfg.MODEL.IMAGE_SIZE[0]))
-    per, prep = {}, {}
+    per, entries = {}, []                    # entries: (view, "r"/"l", batch)
     tms = {"prep_ms": 0.0, "fwd_ms": 0.0, "post_ms": 0.0}
     t0 = time.perf_counter()
     with torch.no_grad(), _quiet():
         for v, frame in frames.items():
+            run_r, run_l = (want or {}).get(v, (True, True))
             sr, sl = (sides or {}).get(v, (None, None))
-            rbox = _hand_box_view(k17s[v], R_WRIST, R_ELBOW, args, sr)
-            lbox = _hand_box_view(k17s[v], L_WRIST, L_ELBOW, args, sl)
+            rbox = (_hand_box_view(k17s[v], R_WRIST, R_ELBOW, args, sr)
+                    if run_r else None)
+            lbox = (_hand_box_view(k17s[v], L_WRIST, L_ELBOW, args, sl)
+                    if run_l else None)
             per[v] = (None, None, None, None, rbox, lbox)
-            if rbox is None or lbox is None:
+            if rbox is None and lbox is None:
                 continue
+            # the GPU prep wants both boxes — mirror the present one into the
+            # missing slot and drop that output (crops are cheap, the fwd isn't)
             bl, br, _ = _prepare_hand_batches_gpu(
-                cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), lbox[None], rbox[None],
+                cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+                (lbox if lbox is not None else rbox)[None],
+                (rbox if rbox is not None else lbox)[None],
                 cam_ints[v], output_size=out_hw, padding=0.9, device="cuda")
-            prep[v] = (bl, br, rbox, lbox)
-        if not prep:
+            if rbox is not None:
+                entries.append((v, "r", br))
+            if lbox is not None:
+                entries.append((v, "l", bl))
+        if not entries:
             return per, tms, {}
-        views = list(prep)
-        bh = {k: torch.cat([torch.cat([prep[v][0][k], prep[v][1][k]], dim=1)
-                            for v in views], dim=0)
+        bh = {k: torch.cat([b[k] for _, _, b in entries], dim=0)
               for k in ("img", "img_size", "ori_img_size", "bbox_center",
                         "bbox_scale", "bbox", "affine_trans", "mask",
-                        "mask_score", "person_valid")}
-        bh["cam_int"] = torch.cat([prep[v][0]["cam_int"] for v in views], dim=0)
+                        "mask_score", "person_valid", "cam_int")}
         model._initialize_batch(bh)
         torch.cuda.synchronize()
         tms["prep_ms"] = (time.perf_counter() - t0) * 1e3
@@ -515,23 +537,23 @@ def _hand_decoder_step_views(model, frames, k17s, cam_ints, args, sides=None):
     p3d = mhr.get("pred_keypoints_3d")
     if p3d is not None:
         p3d = p3d.detach().float().cpu().numpy()
-    for i, v in enumerate(views):
-        kp_l = p2d[2 * i][HAND_SRC].copy()
-        kp_l[:, 0] = frames[v].shape[1] - kp_l[:, 0] - 1     # un-flip left hand
-        kp_r = p2d[2 * i + 1][HAND_SRC]
-        k3r = k3l = None
-        if p3d is not None:
-            k3r = p3d[2 * i + 1][HAND_SRC]
-            k3l = p3d[2 * i][HAND_SRC].copy()
-            k3l[:, 0] *= -1                                  # un-flip left hand
-        per[v] = (kp_r, kp_l, k3r, k3l, prep[v][2], prep[v][3])
-    crops = {}
-    for v in views:
-        # decoder input tiles, back to uint8 RGB (left was decoded on the
-        # mirrored image → un-flip it so it reads naturally)
-        r = (prep[v][1]["img"][0, 0].permute(1, 2, 0) * 255).byte().cpu().numpy()
-        l = (prep[v][0]["img"][0, 0].permute(1, 2, 0) * 255).byte().cpu().numpy()
-        crops[v] = (r, np.ascontiguousarray(l[:, ::-1]))
+    out2d, out3d, crops = {}, {}, {}
+    for i, (v, h, b) in enumerate(entries):
+        kp = p2d[i][HAND_SRC].copy()
+        k3 = p3d[i][HAND_SRC].copy() if p3d is not None else None
+        # decoder input tile, back to uint8 RGB (left was decoded on the
+        # mirrored image → un-flip tile and pixels so they read naturally)
+        tile = (b["img"][0, 0].permute(1, 2, 0) * 255).byte().cpu().numpy()
+        if h == "l":
+            kp[:, 0] = frames[v].shape[1] - kp[:, 0] - 1
+            if k3 is not None:
+                k3[:, 0] *= -1
+            tile = np.ascontiguousarray(tile[:, ::-1])
+        out2d[(v, h)], out3d[(v, h)] = kp, k3
+        crops.setdefault(v, [None, None])[0 if h == "r" else 1] = tile
+    for v, (_, _, _, _, rbox, lbox) in per.items():
+        per[v] = (out2d.get((v, "r")), out2d.get((v, "l")),
+                  out3d.get((v, "r")), out3d.get((v, "l")), rbox, lbox)
     tms["post_ms"] = (time.perf_counter() - t0) * 1e3
     return per, tms, crops
 
@@ -543,9 +565,16 @@ class HandWorker(threading.Thread):
     batched forward (_hand_decoder_step_views) — and triangulates the 21
     keypoints of each hand across the views, exactly like the body markers:
     metric scale and robustness when one view loses the hand (per-joint
-    epipolar rejection in triangulate_with_reproj; the mono hand-cam
+    epipolar rejection in triangulate_with_reproj; the mono best-view
     prediction is kept as fallback for fuse_goliath70).
     views=[hand_cam] = original mono behaviour.
+
+    With 3+ cameras (--hand-topk), each hand independently picks its K best
+    views every frame (hand_view_select: crop size × palm visibility from
+    the triangulated wrist/thumb/pinky markers × per-view NLF confidence ×
+    in-frame fraction, with switch hysteresis) — only those crops enter the
+    decoder batch, so 4 cams cost the same forward as the old 2-cam stereo
+    while always decoding the closest, most face-on, least occluded views.
     """
 
     def __init__(self, cams, body, model, calib, args, views, hand_cam):
@@ -555,10 +584,44 @@ class HandWorker(threading.Thread):
         self.views, self.hand_cam = views, hand_cam
         self.cam_ints = {v: torch.tensor([calib[0][v]], dtype=torch.float32)
                          for v in views}
+        k = args.hand_topk if args.hand_topk >= 0 else \
+            (2 if len(views) >= 3 else 0)            # auto: select on 3+ cams
+        self.topk = k if 0 < k < len(views) else 0   # 0 = decode all views
+        self._sel_prev = {"r": set(), "l": set()}    # hysteresis state
         self._forearm = {"r": None, "l": None}   # EMA 3D forearm length (m)
-        self.result = None   # dict: hand-cam kp_r/kp_l/k3r/k3l + stereo X_r/X_l
+        self.result = None   # dict: best-view kp_r/kp_l/k3r/k3l + stereo X_r/X_l
         self.n = 0
         self._lock = threading.Lock()
+
+    def _select(self, res, views, sides):
+        """Per-hand top-K view choice → ({view: (run_r, run_l)},
+        {"r"/"l": ranked view list}). See hand_view_select for the score."""
+        _, _, Rs, Ts = self.calib
+        a = self.args
+        picked, order = {}, {}
+        for hi, (hand, pair, palm, mks) in enumerate(
+                (("r", R_WRIST_PAIR, R_PALM, R_HAND_MARKERS),
+                 ("l", L_WRIST_PAIR, L_PALM, L_HAND_MARKERS))):
+            wri = _pair_mid(res["kp3d"], *pair)
+            n = palm_normal(wri, res["kp3d"][palm[0]], res["kp3d"][palm[1]])
+            cands = {}
+            for v in views:
+                side = (sides or {}).get(v, (None, None))[hi]
+                cands[v] = {
+                    "size": side,
+                    "vis": view_visibility(n, wri, Rs[v], Ts[v]),
+                    "conf": float(np.mean(res["scores"][v][mks])),
+                    "in_frame": in_frame_fraction(
+                        _pair_mid(res["kp2d"][v], *pair), side,
+                        a.cap_width, a.cap_height),
+                }
+            sel, rank, _ = select_views(cands, self.topk,
+                                        self._sel_prev[hand],
+                                        a.hand_switch_bonus)
+            self._sel_prev[hand] = set(sel)
+            picked[hand], order[hand] = set(sel), rank
+        want = {v: (v in picked["r"], v in picked["l"]) for v in views}
+        return want, order
 
     def _hand_size(self, key, wrist_w, elbow_w):
         """Metric crop side (m) for one hand: hand_size_frac x the subject's
@@ -614,12 +677,33 @@ class HandWorker(threading.Thread):
                 sides = {v: (_metric_side_px(wr, Ks[v], Rs[v], Ts[v], size_r),
                              _metric_side_px(wl, Ks[v], Rs[v], Ts[v], size_l))
                          for v in frames}
-            # one batched forward for all views (and both hands of each)
+            # per-hand top-K view selection (skipped when topk == 0)
+            want = rank = None
+            if self.topk:
+                want, rank = self._select(res, list(frames), sides)
+            # one batched forward for all selected (view, hand) crops
             per, tms, crops = _hand_decoder_step_views(
-                self.model, frames, k17s, self.cam_ints, self.args, sides)
+                self.model, frames, k17s, self.cam_ints, self.args, sides,
+                want)
             last_body = nb
-            kp_r, kp_l, k3r, k3l, rbox, lbox = per.get(self.hand_cam,
-                                                       (None,) * 6)
+
+            # per-hand MONO source = best-ranked view with an output (fixed
+            # hand-cam first when not selecting); fuse_goliath70 must rotate
+            # its offsets with THIS view's extrinsics → src_r/src_l exported
+            def _first(order, idx):
+                for v in order:
+                    out = per.get(v)
+                    if out is not None and out[idx] is not None:
+                        return v
+                return None
+            fallback = [self.hand_cam] + [v for v in self.views
+                                          if v != self.hand_cam]
+            src_r = _first((rank or {}).get("r", fallback), 0)
+            src_l = _first((rank or {}).get("l", fallback), 1)
+            kp_r, k3r, rbox = ((per[src_r][0], per[src_r][2], per[src_r][4])
+                               if src_r is not None else (None, None, None))
+            kp_l, k3l, lbox = ((per[src_l][1], per[src_l][3], per[src_l][5])
+                               if src_l is not None else (None, None, None))
             # stack each hand's 2D across views and stereo-triangulate
             kp2d_views = np.full((ncam, 42, 2), np.nan, np.float32)
             for v, out in per.items():
@@ -641,6 +725,9 @@ class HandWorker(threading.Thread):
                                "k3r": k3r, "k3l": k3l, "ms": ms, "tms": tms,
                                "crops": crops, "forearm": dict(self._forearm),
                                "rbox": rbox, "lbox": lbox,
+                               "src_r": src_r, "src_l": src_l,
+                               "sel": ({h: sorted(self._sel_prev[h])
+                                        for h in ("r", "l")} if want else None),
                                "X_r": X_r, "X_l": X_l,
                                "kp2d_views": kp2d_views,
                                "views": {v: (out[0], out[1], out[4], out[5])
@@ -661,16 +748,18 @@ class HandWorker(threading.Thread):
 MIN_STEREO_JOINTS = 12
 
 
-def fuse_goliath70(mk3d, hands, R_world_handcam):
+def fuse_goliath70(mk3d, hands, Rw_r, Rw_l):
     """(43,3) metric markers + decoder hands → (70,3) Goliath, world/cam0 frame.
 
+    Rw_r/Rw_l: cam→world rotation of each hand's mono SOURCE view (they can
+    differ — with per-hand view selection each hand has its own best view).
     Elbow/wrist Goliath slots get the lateral+medial marker midpoints (true
     joint centres). Hand blocks, best source first:
       1. STEREO (X_r/X_l): keypoints triangulated across the views — true
          metric scale AND absolute position; joints that failed the epipolar
          check are filled with the mono offsets re-anchored at the stereo
          wrist, so the hand stays internally consistent.
-      2. MONO: decoder offsets rotated from the hand-camera frame into the
+      2. MONO: decoder offsets rotated from the source-camera frame into the
          world frame, anchored at the triangulated (metric) wrist centre,
          with the decoder's own hand size (MHR average-hand scale).
     """
@@ -681,12 +770,12 @@ def fuse_goliath70(mk3d, hands, R_world_handcam):
         g[gi] = _pair_mid(mk3d, a, b)
     if hands is None:
         return g
-    for dec, Xst, sl, pair, disp in (
-            (hands["k3r"], hands.get("X_r"), slice(21, 42), R_WRIST_PAIR, (+0.15, 0, 0.5)),
-            (hands["k3l"], hands.get("X_l"), slice(42, 63), L_WRIST_PAIR, (-0.15, 0, 0.5))):
+    for dec, Rw, Xst, sl, pair, disp in (
+            (hands["k3r"], Rw_r, hands.get("X_r"), slice(21, 42), R_WRIST_PAIR, (+0.15, 0, 0.5)),
+            (hands["k3l"], Rw_l, hands.get("X_l"), slice(42, 63), L_WRIST_PAIR, (-0.15, 0, 0.5))):
         off = None
-        if dec is not None:
-            off = (dec - dec[_H_WRIST]) @ R_world_handcam.T
+        if dec is not None and Rw is not None:
+            off = (dec - dec[_H_WRIST]) @ Rw.T
         if Xst is not None:
             vst = np.isfinite(Xst).all(1)
             if vst[_H_WRIST] and vst.sum() >= MIN_STEREO_JOINTS:
@@ -897,6 +986,18 @@ def main():
                    help="run the hand decoder on the hand-cam only (original "
                         "behaviour, half the decoder batch) instead of all "
                         "views batched + stereo triangulation")
+    p.add_argument("--hand-topk", type=int, default=-1,
+                   help="decode each hand in only its K best views — score = "
+                        "crop px size x palm-plane visibility (from the "
+                        "triangulated wrist/thumb/pinky markers) x per-view "
+                        "NLF hand-marker confidence x in-frame fraction "
+                        "(hand_view_select.py). -1 = auto: 2 with 3+ cams "
+                        "(4 cams cost the same decoder batch as 2-cam "
+                        "stereo), all views with <=2 cams. 0 = all views")
+    p.add_argument("--hand-switch-bonus", type=float, default=1.15,
+                   help="view-selection hysteresis: score multiplier for the "
+                        "views a hand used last frame — stops two near-equal "
+                        "views from flapping every frame (1.0 = off)")
     p.add_argument("--hand-reproj-thr", type=float, default=15.0,
                    help="max reprojection error (px) for a stereo hand joint; "
                         "above → epipolar-inconsistent (occluded/hallucinated "
@@ -1013,6 +1114,12 @@ def main():
     if len(hand_views) >= 2:
         print(f"  STEREO hands: decoder on views {hand_views}, epipolar check "
               f"{args.hand_reproj_thr:.0f}px (--mono-hands to disable)")
+        if hands_topk_info := (args.hand_topk if args.hand_topk >= 0
+                               else (2 if len(hand_views) >= 3 else 0)):
+            print(f"  per-hand view selection: top-{hands_topk_info} of "
+                  f"{len(hand_views)} views per hand (crop size x palm "
+                  f"visibility x NLF conf, hysteresis x"
+                  f"{args.hand_switch_bonus:.2f}) — --hand-topk 0 disables")
     hands = HandWorker(cams, body, est.model, (Ks, Ds, Rs, Ts), args,
                        hand_views, args.hand_cam)
     hands.start()
@@ -1043,7 +1150,15 @@ def main():
             t_wall = time.time()
             hres = hands.latest()
 
-            g70 = fuse_goliath70(res["kp3d"], hres, R_world_handcam)
+            # cam→world rotation of each hand's mono source view (per-hand
+            # view selection: the two hands may come from different cameras)
+            Rw_r = Rw_l = R_world_handcam
+            if hres is not None:
+                if hres.get("src_r") is not None:
+                    Rw_r = Rs[hres["src_r"]].T
+                if hres.get("src_l") is not None:
+                    Rw_l = Rs[hres["src_l"]].T
+            g70 = fuse_goliath70(res["kp3d"], hres, Rw_r, Rw_l)
 
             # stream the right hand (wrist-relative 3D) to the teleop MPC —
             # fused (stereo when trusted, world frame) with the raw mono
@@ -1110,9 +1225,11 @@ def main():
             if hres is not None and hres.get("crops"):
                 tiles = []
                 for v in sorted(hres["crops"]):
-                    vw = hres["views"].get(v, (None, None, None, None))
-                    kps, boxes = (vw[0], vw[1]), (vw[2], vw[3])
+                    hv = hres["views"].get(v, (None, None, None, None))
+                    kps, boxes = (hv[0], hv[1]), (hv[2], hv[3])
                     for ti, (tile, lab) in enumerate(zip(hres["crops"][v], ("R", "L"))):
+                        if tile is None:       # hand not selected in this view
+                            continue
                         tile = cv2.cvtColor(tile, cv2.COLOR_RGB2BGR)   # draw in BGR
                         kp, box = kps[ti], boxes[ti]
                         if kp is not None and box is not None and np.isfinite(box).all():
@@ -1122,10 +1239,11 @@ def main():
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                                     (0, 255, 255), 2, cv2.LINE_AA)
                         tiles.append(cv2.cvtColor(tile, cv2.COLOR_BGR2RGB))
-                crop_strip = cv2.hconcat(tiles)
-                if crop_strip.shape[0] > 256:         # bandwidth: cap at 256 tall
-                    s = 256.0 / crop_strip.shape[0]
-                    crop_strip = cv2.resize(crop_strip, None, fx=s, fy=s)
+                if tiles:
+                    crop_strip = cv2.hconcat(tiles)
+                    if crop_strip.shape[0] > 256:     # bandwidth: cap at 256 tall
+                        s = 256.0 / crop_strip.shape[0]
+                        crop_strip = cv2.resize(crop_strip, None, fx=s, fy=s)
 
             viz.log(nb, t_wall, overlays, res["kp3d"], g70,
                     res["ms"], hres["ms"] if hres else None, res["sync_ms"],
@@ -1180,6 +1298,9 @@ def main():
                     st += (", forearm "
                            + " ".join(f"{k.upper()} {v * 100:.0f}cm"
                                       for k, v in fa.items() if v))
+                if hres is not None and hres.get("sel"):
+                    st += ", hand views " + " ".join(
+                        f"{h.upper()}{s}" for h, s in hres["sel"].items())
                 print(f"  body {ema or 0:4.1f} Hz  (total {res['ms']:.0f} ms: "
                       f"yolo {res['yolo_ms']:.0f} + nlf {res['nlf_ms']:.0f}, "
                       f"hands {hres['ms'] if hres else 0:.0f} ms, "
