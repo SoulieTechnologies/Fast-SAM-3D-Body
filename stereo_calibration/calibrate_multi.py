@@ -95,6 +95,12 @@ def detect_all(cam, board, dictionary, min_corners):
     return out
 
 
+def count_shared(deta, detb, min_common):
+    """Frames where BOTH cameras saw >= min_common common ChArUco corners."""
+    return sum(1 for name in set(deta) & set(detb)
+               if len(set(deta[name]) & set(detb[name])) >= min_common)
+
+
 def pair_extrinsics(deta, detb, Ka, Da, Kb, Db, img_size, chess, min_common,
                     max_frames=40):
     """(R, T, rms, n_frames) with x_b = R @ x_a + T, or None if < 6 shared
@@ -206,16 +212,29 @@ def main():
             for c in cams}
     chess = board.getChessboardCorners()
 
+    # connectivity warmup BEFORE any solve: which pairs share board frames
+    # (the capture only ever needs 2 cameras at a time — this shows whether
+    # the resulting graph reaches cam0 everywhere, and what will be chained)
+    shared = {}
+    print("  shared-frame overlap:")
+    for i in range(len(cams)):
+        for j in range(i + 1, len(cams)):
+            a, b = cams[i], cams[j]
+            shared[(a, b)] = count_shared(dets[a], dets[b], args.min_common)
+            mark = "" if shared[(a, b)] >= 6 else "   <- too few, not solvable"
+            print(f"    cam{a}<->cam{b}: {shared[(a, b)]:4d} frames{mark}")
+
     print(f"[3/3] Pairwise extrinsics, chained to cam{cams[0]}...")
     pairs = {}
     for i in range(len(cams)):
         for j in range(i + 1, len(cams)):
             a, b = cams[i], cams[j]
+            if shared[(a, b)] < 6:
+                continue
             r = pair_extrinsics(dets[a], dets[b], K[a], D[a], K[b], D[b],
                                 img_size, chess, args.min_common,
                                 args.max_pair_frames)
             if r is None:
-                print(f"  cam{a}<->cam{b}: <6 shared frames (skipped)")
                 continue
             pairs[(a, b)] = r
             used = min(r[3], args.max_pair_frames)
