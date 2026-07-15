@@ -228,8 +228,63 @@ def test_handworker_select():
     print("  HandWorker._select on the 4-cam rig ok")
 
 
+
+
+def test_handworker_run_once():
+    """One full HandWorker.run() iteration end-to-end (fake cams/body/model):
+    selection → flat decoder batch → per-hand sources → result dict."""
+    import tools.test_view_selection as rig
+    chd._STOP.clear()
+    Rs = [rig.CAMS[i][0] for i in range(4)]
+    Ts = [rig.CAMS[i][1] for i in range(4)]
+    calib = ([np.eye(3)] * 4, [np.zeros(5)] * 4, Rs, Ts)
+    wri, thu, pin = rig.hand_markers([0, 0, 1])
+    kp3d = np.full((chd.NMK, 3), np.nan, np.float32)
+    kp3d[chd.R_WRIST_PAIR[0]] = kp3d[chd.R_WRIST_PAIR[1]] = wri
+    kp3d[chd.R_PALM[0]], kp3d[chd.R_PALM[1]] = thu, pin
+    res = {"kp3d": kp3d,
+           "kp2d": np.full((4, chd.NMK, 2), 320.0, np.float32),
+           "scores": np.ones((4, chd.NMK), np.float32)}
+
+    class FakeCam:
+        def latest(self):
+            return np.zeros((480, 640, 3), np.uint8), 0.0, 1
+
+    class FakeBody:
+        calls = 0
+
+        def latest(self):
+            FakeBody.calls += 1
+            if FakeBody.calls >= 2:
+                chd._STOP.set()
+            return res, 1
+
+    args = types.SimpleNamespace(
+        hand_topk=-1, hand_switch_bonus=1.15, cap_width=640, cap_height=480,
+        hand_size_m=0, hand_size_frac=0, det_thr=0.3, hand_reproj_thr=15.0,
+        hand_res=64)
+    hw = chd.HandWorker([FakeCam()] * 4, FakeBody(), FakeModel(), calib,
+                        args, [0, 1, 2, 3], hand_cam=0)
+    assert hw.topk == 2, "auto topk on 4 views"
+    hw.run()                                    # exits via _STOP
+    chd._STOP.clear()
+    r = hw.result
+    assert r is not None and hw.n == 1
+    assert len(r["sel"]["r"]) == 2 and len(r["sel"]["l"]) == 2
+    assert set(r["sel"]["r"]) == {0, 1}, f"flat right hand → front cams: {r['sel']}"
+    assert r["src_r"] in r["sel"]["r"] and r["src_l"] in r["sel"]["l"]
+    assert r["kp_r"] is not None and r["kp_l"] is not None
+    # kp2d_views populated exactly on the selected (view, hand) slots
+    got_r = set(np.flatnonzero(np.isfinite(r["kp2d_views"][:, :21]).all((1, 2))))
+    got_l = set(np.flatnonzero(np.isfinite(r["kp2d_views"][:, 21:]).all((1, 2))))
+    assert got_r == set(r["sel"]["r"]) and got_l == set(r["sel"]["l"])
+    assert r["X_r"].shape == (21, 3) and "tri_ms" in r["tms"]
+    print("  HandWorker.run() one iteration ok")
+
+
 if __name__ == "__main__":
     test_routing()
     test_no_want_all_views()
     test_handworker_select()
+    test_handworker_run_once()
     print("all integration tests passed")
