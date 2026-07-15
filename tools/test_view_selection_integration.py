@@ -225,6 +225,20 @@ def test_handworker_select():
     kp3d[chd.R_PALM[0]], kp3d[chd.R_PALM[1]] = thu2, pin2
     want, order = hw._select(res, [0, 1, 2, 3], sides)
     assert order["r"][0] == 2, f"left side cam should now rank first: {order}"
+    # no 3D and no metric sides -> the 2D projected-forearm fallback must
+    # still rank "biggest crop" first (view 2 gets a 3x longer forearm)
+    kp2d = np.full((4, chd.NMK, 2), np.nan, np.float32)
+    for v in range(4):
+        L = 150.0 if v == 2 else 50.0
+        for m in chd.R_WRIST_PAIR:
+            kp2d[v, m] = (320.0, 240.0)
+        for m in chd.R_ELBOW_PAIR:
+            kp2d[v, m] = (320.0 + L, 240.0)
+    res2 = {"kp3d": np.full((chd.NMK, 3), np.nan, np.float32),
+            "kp2d": kp2d, "scores": np.ones((4, chd.NMK), np.float32)}
+    hw._sel_prev = {"r": set(), "l": set()}
+    want, order = hw._select(res2, [0, 1, 2, 3], None)
+    assert order["r"][0] == 2, f"2D forearm fallback must rank size: {order}"
     print("  HandWorker._select on the 4-cam rig ok")
 
 

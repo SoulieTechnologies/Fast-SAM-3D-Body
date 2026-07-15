@@ -606,9 +606,9 @@ class HandWorker(threading.Thread):
         _, _, Rs, Ts = self.calib
         a = self.args
         picked, order = {}, {}
-        for hi, (hand, pair, palm, mks) in enumerate(
-                (("r", R_WRIST_PAIR, R_PALM, R_HAND_MARKERS),
-                 ("l", L_WRIST_PAIR, L_PALM, L_HAND_MARKERS))):
+        for hi, (hand, pair, elb, palm, mks) in enumerate(
+                (("r", R_WRIST_PAIR, R_ELBOW_PAIR, R_PALM, R_HAND_MARKERS),
+                 ("l", L_WRIST_PAIR, L_ELBOW_PAIR, L_PALM, L_HAND_MARKERS))):
             wri = _pair_mid(res["kp3d"], *pair)
             n = palm_normal(wri, res["kp3d"][palm[0]], res["kp3d"][palm[1]])
             # camera->wrist rays (world frame) for the triangulation-diversity
@@ -616,15 +616,24 @@ class HandWorker(threading.Thread):
             rays = None
             if np.isfinite(wri).all():
                 rays = {v: wri - (-Rs[v].T @ Ts[v]) for v in views}
+            size_h = {v: (sides or {}).get(v, (None, None))[hi] for v in views}
+            if any(s is None or not np.isfinite(s) for s in size_h.values()):
+                # no metric side everywhere → UNIFORM 2D proxy so "biggest
+                # crop" still ranks: projected forearm length per view
+                # (mixing metric px with 2D px across views would mis-rank)
+                for v in views:
+                    w2 = _pair_mid(res["kp2d"][v], *pair)
+                    e2 = _pair_mid(res["kp2d"][v], *elb)
+                    ok = np.isfinite(w2).all() and np.isfinite(e2).all()
+                    size_h[v] = float(np.linalg.norm(w2 - e2)) if ok else None
             cands = {}
             for v in views:
-                side = (sides or {}).get(v, (None, None))[hi]
                 cands[v] = {
-                    "size": side,
+                    "size": size_h[v],
                     "vis": view_visibility(n, wri, Rs[v], Ts[v]),
                     "conf": float(np.mean(res["scores"][v][mks])),
                     "in_frame": in_frame_fraction(
-                        _pair_mid(res["kp2d"][v], *pair), side,
+                        _pair_mid(res["kp2d"][v], *pair), size_h[v],
                         a.cap_width, a.cap_height),
                 }
             sel, rank, _ = select_views(cands, self.topk,
