@@ -1133,11 +1133,13 @@ def main():
     if len(hand_views) >= 2:
         print(f"  STEREO hands: decoder on views {hand_views}, epipolar check "
               f"{args.hand_reproj_thr:.0f}px (--mono-hands to disable)")
-        if hands_topk_info := (args.hand_topk if args.hand_topk >= 0
-                               else (2 if len(hand_views) >= 3 else 0)):
-            print(f"  per-hand view selection: top-{hands_topk_info} of "
+        # same clamp as HandWorker: 0 < k < nviews, else selection is off
+        k = (args.hand_topk if args.hand_topk >= 0
+             else (2 if len(hand_views) >= 3 else 0))
+        if 0 < k < len(hand_views):
+            print(f"  per-hand view selection: top-{k} of "
                   f"{len(hand_views)} views per hand (crop size x palm "
-                  f"visibility x NLF conf, hysteresis x"
+                  f"visibility x NLF conf x ray diversity, hysteresis x"
                   f"{args.hand_switch_bonus:.2f}) — --hand-topk 0 disables")
     hands = HandWorker(cams, body, est.model, (Ks, Ds, Rs, Ts), args,
                        hand_views, args.hand_cam)
