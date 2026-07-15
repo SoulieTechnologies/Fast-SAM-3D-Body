@@ -47,6 +47,11 @@ Run:
   # multi-camera (metric 3D):
   python cosmik_hand_demo.py --cams 0,1 --calib stereo_params.npz \
       --checkpoint_dir ./checkpoints/sam-3d-body-dinov3 --rerun-mode native
+  # 4 cameras (2 front + 2 side): calibrate with stereo_calibration/
+  # capture_calibration_multi.py + calibrate_multi.py, then — per-hand
+  # best-view selection kicks in automatically (top-2, --hand-topk):
+  python cosmik_hand_demo.py --cams 0,1,2,3 --calib multi_params.npz \
+      --cap-width 1920 --cap-height 1080 --rerun-mode web
   # MONO mode (no calib yet): markers 2D + hand-decoder fingers, no metric body 3D
   python cosmik_hand_demo.py --cams 0 --fx 540 --rerun-mode native
 """
@@ -1205,6 +1210,15 @@ def main():
                             cv2.rectangle(img, tuple(box[:2].astype(int)),
                                           tuple(box[2:].astype(int)),
                                           (255, 170, 80), 2)
+                # view-selection badge: which hands THIS camera is decoding
+                # (green = selected; grey = skipped this frame)
+                if hres is not None and hres.get("sel"):
+                    for k, (hand, lab) in enumerate((("r", "R"), ("l", "L"))):
+                        on = i in hres["sel"][hand]
+                        cv2.putText(img, lab, (img.shape[1] - 76 + 38 * k, 40),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1.1,
+                                    (60, 220, 60) if on else (90, 90, 90),
+                                    3, cv2.LINE_AA)
                 # reproject the fused metric-3D hand (what actually drives the
                 # robot) — hollow skeleton, to compare against the solid raw
                 # detection: any divergence is triangulation/fusion error
