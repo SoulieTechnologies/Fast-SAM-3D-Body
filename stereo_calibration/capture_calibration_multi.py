@@ -59,6 +59,12 @@ ap.add_argument("--focus", type=float, default=None,
                      "readout: corners N/88 + sharp value on the board")
 ap.add_argument("--exposure", type=float, default=None)
 ap.add_argument("--gain", type=float, default=None)
+ap.add_argument("--display-width", type=int, default=1700,
+                help="max preview mosaic width (px); the window is also "
+                     "freely resizable with the mouse")
+ap.add_argument("--display-height", type=int, default=900,
+                help="max preview mosaic height (px) — lower it if the "
+                     "bottom row is cut off by the taskbar")
 ap.add_argument("--rotate180", action="store_true",
                 help="rotate every frame 180 (upside-down mount); the demo MUST "
                      "then run with the same flag")
@@ -181,16 +187,22 @@ def grid(images):
     n = len(images)
     cols = int(np.ceil(np.sqrt(n)))
     rows = int(np.ceil(n / cols))
-    h, w = images[0].shape[:2]
     blank = np.zeros_like(images[0])
     cells = images + [blank] * (rows * cols - n)
     mosaic = cv2.vconcat([cv2.hconcat(cells[r * cols:(r + 1) * cols])
                           for r in range(rows)])
-    if mosaic.shape[1] > 2400:
-        s = 2400.0 / mosaic.shape[1]
+    # fit BOTH dimensions on screen (4x1080p in 2x2 is 3840x2160 raw)
+    s = min(1.0, args.display_width / mosaic.shape[1],
+            args.display_height / mosaic.shape[0])
+    if s < 1.0:
         mosaic = cv2.resize(mosaic, None, fx=s, fy=s)
     return mosaic
 
+
+WIN = "Multi-cam calibration  [s=save q=quit]"
+# WINDOW_NORMAL: the preview scales to the window -> drag it to any size
+cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
+_win_sized = False
 
 print("Press 's' to save a frame set, 'q' to quit.")
 while True:
@@ -210,7 +222,11 @@ while True:
     for d in disps:
         cv2.putText(d, f"saved {count}  seen {n_ok}/{len(caps)}  {exp_txt}",
                     (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-    cv2.imshow("Multi-cam calibration  [s=save q=quit]", grid(disps))
+    mosaic = grid(disps)
+    if not _win_sized:                    # start at the fitted size once
+        cv2.resizeWindow(WIN, mosaic.shape[1], mosaic.shape[0])
+        _win_sized = True
+    cv2.imshow(WIN, mosaic)
 
     key = cv2.waitKey(1) & 0xFF
     if key == ord('q'):
