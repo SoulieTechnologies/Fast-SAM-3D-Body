@@ -526,6 +526,7 @@ def _hand_decoder_step_views(model, frames, k17s, cam_ints, args, sides=None,
                 entries.append((v, "l", bl))
         if not entries:
             return per, tms, {}
+        tms["batch"] = len(entries)          # decoder crops this forward
         bh = {k: torch.cat([b[k] for _, _, b in entries], dim=0)
               for k in ("img", "img_size", "ori_img_size", "bbox_center",
                         "bbox_scale", "bbox", "affine_trans", "mask",
@@ -846,13 +847,16 @@ class Viz:
         )))
 
     def log(self, seq, t_wall, overlays, mk3d, g70, body_ms, hand_ms, sync_ms,
-            fps, cam_fps=None, jpeg_quality=75, hand_crops=None):
+            fps, cam_fps=None, jpeg_quality=75, hand_crops=None,
+            hand_batch=None):
         rr = self.rr
         rr.set_time("frame", sequence=seq)
         rr.set_time("time", timestamp=t_wall)
         rr.log("timing/body_ms", rr.Scalars(float(body_ms)))
         if hand_ms is not None:
             rr.log("timing/hand_ms", rr.Scalars(float(hand_ms)))
+        if hand_batch is not None:           # decoder crops (selection check)
+            rr.log("timing/hand_batch", rr.Scalars(float(hand_batch)))
         rr.log("timing/sync_ms", rr.Scalars(float(sync_ms)))
         rr.log("timing/body_fps", rr.Scalars(float(fps)))
         for i, cf in enumerate(cam_fps or []):
@@ -1279,7 +1283,9 @@ def main():
             viz.log(nb, t_wall, overlays, res["kp3d"], g70,
                     res["ms"], hres["ms"] if hres else None, res["sync_ms"],
                     ema or 0.0, cam_fps=[c.fps for c in cams],
-                    jpeg_quality=args.jpeg_quality, hand_crops=crop_strip)
+                    jpeg_quality=args.jpeg_quality, hand_crops=crop_strip,
+                    hand_batch=(hres.get("tms", {}).get("batch")
+                                if hres else None))
 
             if rec is not None:
                 rec["b3d"].append(res["kp3d"])
