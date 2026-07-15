@@ -282,9 +282,76 @@ def test_handworker_run_once():
     print("  HandWorker.run() one iteration ok")
 
 
+
+
+def test_selection_dynamics():
+    """Palm rotates from facing the front cams to facing the LEFT side cam
+    over 120 simulated body frames: the right hand's selection must migrate
+    to include cam 2, with few switches (hysteresis, no flapping)."""
+    import tools.test_view_selection as rig
+    chd._STOP.clear()
+    Rs = [rig.CAMS[i][0] for i in range(4)]
+    Ts = [rig.CAMS[i][1] for i in range(4)]
+    calib = ([np.eye(3)] * 4, [np.zeros(5)] * 4, Rs, Ts)
+    N = 120
+    seq = []
+    for i in range(N):
+        # hold front for 40 frames, then rotate 90 deg toward -x over 40
+        ang = min(1.0, max(0.0, (i - 40) / 40.0)) * (np.pi / 2)
+        wri, thu, pin = rig.hand_markers([-np.sin(ang), 0.0, np.cos(ang)])
+        kp3d = np.full((chd.NMK, 3), np.nan, np.float32)
+        kp3d[chd.R_WRIST_PAIR[0]] = kp3d[chd.R_WRIST_PAIR[1]] = wri
+        kp3d[chd.R_PALM[0]], kp3d[chd.R_PALM[1]] = thu, pin
+        seq.append({"kp3d": kp3d,
+                    "kp2d": np.full((4, chd.NMK, 2), 320.0, np.float32),
+                    "scores": np.ones((4, chd.NMK), np.float32)})
+
+    class FakeCam:
+        def latest(self):
+            return np.zeros((480, 640, 3), np.uint8), 0.0, 1
+
+    class FakeBody:
+        n = 0
+
+        def latest(self):
+            if FakeBody.n >= N:
+                chd._STOP.set()
+                return seq[-1], N
+            FakeBody.n += 1
+            return seq[FakeBody.n - 1], FakeBody.n
+
+    sels = []
+    orig = chd.HandWorker._select
+
+    def rec(self, res, views, sides):
+        want, order = orig(self, res, views, sides)
+        sels.append(tuple(sorted(v for v, (r, _) in want.items() if r)))
+        return want, order
+
+    chd.HandWorker._select = rec
+    try:
+        args = types.SimpleNamespace(
+            hand_topk=-1, hand_switch_bonus=1.15, cap_width=640,
+            cap_height=480, hand_size_m=0, hand_size_frac=0, det_thr=0.3,
+            hand_reproj_thr=15.0, hand_res=64)
+        hw = chd.HandWorker([FakeCam()] * 4, FakeBody(), FakeModel(), calib,
+                            args, [0, 1, 2, 3], hand_cam=0)
+        hw.run()
+    finally:
+        chd.HandWorker._select = orig
+        chd._STOP.clear()
+    assert len(sels) == N
+    assert sels[0] == (0, 1), f"front phase must use the front cams: {sels[0]}"
+    assert 2 in sels[-1], f"left side cam must join after the rotation: {sels[-1]}"
+    switches = sum(a != b for a, b in zip(sels, sels[1:]))
+    assert 1 <= switches <= 4, f"selection flaps: {switches} switches"
+    print(f"  selection dynamics ok (final {sels[-1]}, {switches} switch(es))")
+
+
 if __name__ == "__main__":
     test_routing()
     test_no_want_all_views()
     test_handworker_select()
     test_handworker_run_once()
+    test_selection_dynamics()
     print("all integration tests passed")
