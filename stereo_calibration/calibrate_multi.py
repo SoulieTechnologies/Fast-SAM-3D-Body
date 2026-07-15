@@ -101,67 +101,130 @@ def count_shared(deta, detb, min_common):
                if len(set(deta[name]) & set(detb[name])) >= min_common)
 
 
-def pair_extrinsics(deta, detb, Ka, Da, Kb, Db, img_size, chess, min_common,
-                    max_frames=40):
-    """(R, T, rms, n_frames) with x_b = R @ x_a + T, or None if < 6 shared
-    frames. deta/detb: detect_all outputs for the two cameras.
+def _pnp_pose(det, K, D, chess):
+    """Board pose (R, t) in one camera + reprojection rms (px), K fixed.
+    High rms here = bad corner detections OR a wrong K (autofocus drift)."""
+    ids = sorted(det)
+    obj = chess[ids].reshape(-1, 3).astype(np.float64)
+    img = np.array([det[i] for i in ids], np.float64).reshape(-1, 2)
+    ok, rvec, tvec = cv2.solvePnP(obj, img.reshape(-1, 1, 2), K, D)
+    if not ok:
+        return None
+    proj, _ = cv2.projectPoints(obj, rvec, tvec, K, D)
+    err = float(np.sqrt(np.mean(np.sum((proj.reshape(-1, 2) - img) ** 2, 1))))
+    R, _ = cv2.Rodrigues(rvec)
+    return R, tvec.reshape(3), err
 
-    Shared frames are evenly subsampled to max_frames: stereoCalibrate
-    optimises 6 board-pose params PER VIEW, so its LM step scales badly
-    with the view count (150 views ~ 900 params = tens of minutes) while
-    the extrinsics themselves stop improving after a few dozen varied
-    views."""
-    obj_all, pa_all, pb_all = [], [], []
+
+PNP_THR_PX = 3.0        # per-frame per-camera PnP reprojection gate
+POSE_TOL_M = 0.05       # per-frame relative pose vs consensus: translation
+POSE_TOL_DEG = 3.0      # ... and rotation
+
+
+def pair_extrinsics(deta, detb, Ka, Da, Kb, Db, img_size, chess, min_common,
+                    max_frames=40, la="a", lb="b"):
+    """(R, T, rms, n_inliers) with x_b = R @ x_a + T, or None.
+
+    stereoCalibrate has NO outlier rejection — a handful of frames with
+    grazing-angle ChArUco misdetections or a focal drifted by autofocus
+    poisons the whole solve (seen live: rms 100+ px). So each shared frame
+    is vetted first: solvePnP per camera (K fixed) gives a per-frame board
+    pose + reprojection error, the per-frame RELATIVE pose (R_b R_a^T) must
+    agree with the consensus (medoid) within POSE_TOL, and only the inliers
+    reach stereoCalibrate (evenly subsampled to max_frames — its LM has 6
+    board-pose params per view, 150 views ran for tens of minutes). The
+    printed per-camera PnP median identifies WHICH camera is bad: a high
+    value on one camera = its detections or its K (autofocus?) are off.
+    """
+    frames = []                     # (obj, pa, pb, pose_a, pose_b)
     for name in sorted(set(deta) & set(detb)):
         common = sorted(set(deta[name]) & set(detb[name]))
         if len(common) < min_common:
             continue
-        obj_all.append(chess[common].reshape(-1, 1, 3).astype(np.float32))
-        pa_all.append(np.array([deta[name][i] for i in common],
-                               np.float32).reshape(-1, 1, 2))
-        pb_all.append(np.array([detb[name][i] for i in common],
-                               np.float32).reshape(-1, 1, 2))
-    if len(obj_all) < 6:
+        da = {i: deta[name][i] for i in common}
+        db = {i: detb[name][i] for i in common}
+        frames.append((
+            chess[common].reshape(-1, 1, 3).astype(np.float32),
+            np.array([da[i] for i in common], np.float32).reshape(-1, 1, 2),
+            np.array([db[i] for i in common], np.float32).reshape(-1, 1, 2),
+            _pnp_pose(da, Ka, Da, chess), _pnp_pose(db, Kb, Db, chess)))
+    if len(frames) < 6:
         return None
-    n_shared = len(obj_all)
-    if n_shared > max_frames:
-        idx = np.linspace(0, n_shared - 1, max_frames).astype(int)
-        obj_all = [obj_all[i] for i in idx]
-        pa_all = [pa_all[i] for i in idx]
-        pb_all = [pb_all[i] for i in idx]
+    err_a = np.median([f[3][2] for f in frames if f[3]])
+    err_b = np.median([f[4][2] for f in frames if f[4]])
+    print(f"    cam{la}<->cam{lb}: PnP median reproj cam{la} {err_a:.2f}px "
+          f"cam{lb} {err_b:.2f}px"
+          + ("   <- HIGH: that camera's detections or K are off "
+             "(autofocus? grazing views?)" if max(err_a, err_b) > PNP_THR_PX
+             else ""))
+    # per-frame relative pose, gated by PnP quality
+    rel = []
+    for k, (_, _, _, pa, pb) in enumerate(frames):
+        if pa is None or pb is None or pa[2] > PNP_THR_PX or pb[2] > PNP_THR_PX:
+            continue
+        R = pb[0] @ pa[0].T
+        rel.append((k, R, pb[1] - R @ pa[1]))
+    if len(rel) < 6:
+        print(f"    cam{la}<->cam{lb}: only {len(rel)} frames pass the "
+              f"{PNP_THR_PX:.0f}px PnP gate (of {len(frames)}) — SKIPPED")
+        return None
+    # consensus = translation medoid; keep frames agreeing in R and T
+    ts = np.stack([t for _, _, t in rel])
+    med = rel[int(np.argmin(((ts[None] - ts[:, None]) ** 2).sum(-1).sum(1)))]
+    inl = []
+    for k, R, t in rel:
+        ang = np.degrees(np.arccos(np.clip((np.trace(R @ med[1].T) - 1) / 2,
+                                           -1, 1)))
+        if np.linalg.norm(t - med[2]) <= POSE_TOL_M and ang <= POSE_TOL_DEG:
+            inl.append(k)
+    if len(inl) < 6:
+        print(f"    cam{la}<->cam{lb}: only {len(inl)} pose-consistent "
+              f"frames — SKIPPED")
+        return None
+    n_inl = len(inl)
+    if n_inl > max_frames:
+        inl = [inl[i] for i in
+               np.linspace(0, n_inl - 1, max_frames).astype(int)]
+    dropped = len(frames) - n_inl
+    if dropped:
+        print(f"    cam{la}<->cam{lb}: dropped {dropped}/{len(frames)} "
+              f"outlier frames")
     rms, *_, R, T, _, _ = cv2.stereoCalibrate(
-        obj_all, pa_all, pb_all, Ka, Da, Kb, Db, img_size,
+        [frames[k][0] for k in inl], [frames[k][1] for k in inl],
+        [frames[k][2] for k in inl], Ka, Da, Kb, Db, img_size,
         flags=cv2.CALIB_FIX_INTRINSIC,
         criteria=(cv2.TERM_CRITERIA_MAX_ITER + cv2.TERM_CRITERIA_EPS, 100, 1e-5))
     return (R.astype(np.float64), T.reshape(3).astype(np.float64), rms,
-            n_shared)
+            n_inl)
 
 
 def chain_extrinsics(cams, pairs, ref):
     """World(=cam{ref})->cam R,T for every camera, chaining pairwise links.
 
     pairs: {(a, b): (R, T, rms, n)} with x_b = R @ x_a + T. Greedy
-    max-shared-frames spanning tree from ref (strong links first, so a solid
-    two-hop chain beats a weak direct link). Returns (Rw, Tw, route) dicts;
-    raises SystemExit naming any camera not connected to ref.
+    MIN-STEREO-RMS spanning tree from ref: a clean two-hop chain (0.4 px)
+    beats a rotten direct link, and a poisoned pair never contaminates the
+    cameras it touches. Returns (Rw, Tw, route) dicts; raises SystemExit
+    naming any camera not connected to ref.
     """
     adj = {}
-    for (a, b), (R, T, _, n) in pairs.items():
-        adj.setdefault(a, []).append((b, R, T, n))
-        adj.setdefault(b, []).append((a, R.T, -R.T @ T, n))    # inverted link
+    for (a, b), (R, T, rms, _) in pairs.items():
+        adj.setdefault(a, []).append((b, R, T, rms))
+        adj.setdefault(b, []).append((a, R.T, -R.T @ T, rms))  # inverted link
     Rw, Tw = {ref: np.eye(3)}, {ref: np.zeros(3)}
     route = {ref: [ref]}
     while len(Rw) < len(cams):
-        best = None                    # (n_shared, from, to, R_ab, T_ab)
+        best = None                    # (rms, from, to, R_ab, T_ab)
         for a in list(Rw):
-            for b, R, T, n in adj.get(a, []):
-                if b not in Rw and (best is None or n > best[0]):
-                    best = (n, a, b, R, T)
+            for b, R, T, rms in adj.get(a, []):
+                if b not in Rw and (best is None or rms < best[0]):
+                    best = (rms, a, b, R, T)
         if best is None:
             missing = [c for c in cams if c not in Rw]
             raise SystemExit(
-                f"cams {missing} share no board frames with any calibrated "
-                f"camera — capture sets linking them (any pair works, "
+                f"cams {missing} have no USABLE link to any calibrated "
+                f"camera (no shared frames, or every shared pair was "
+                f"rejected) — recapture sets linking them (any pair works, "
                 f"e.g. side cam together with its nearest front cam)")
         _, a, b, R, T = best
         Rw[b] = R @ Rw[a]
@@ -181,6 +244,10 @@ def main():
     ap.add_argument("--out", default="calibration_data/multi_params.npz")
     ap.add_argument("--min-corners", type=int, default=6,
                     help="min ChArUco corners to accept a detection")
+    ap.add_argument("--max-link-rms", type=float, default=2.0,
+                    help="reject a pairwise link whose stereo rms (px) is "
+                         "above this — better to fail loudly than to save "
+                         "extrinsics that are metres off")
     ap.add_argument("--max-pair-frames", type=int, default=40,
                     help="evenly subsample the shared frames of each pair to "
                          "this many before stereoCalibrate (its LM step has 6 "
@@ -233,14 +300,16 @@ def main():
                 continue
             r = pair_extrinsics(dets[a], dets[b], K[a], D[a], K[b], D[b],
                                 img_size, chess, args.min_common,
-                                args.max_pair_frames)
+                                args.max_pair_frames, la=a, lb=b)
             if r is None:
                 continue
+            print(f"  cam{a}<->cam{b}: {r[3]} inlier frames, stereo rms "
+                  f"{r[2]:.3f} px, baseline {np.linalg.norm(r[1]) * 100:.1f} cm")
+            if r[2] > args.max_link_rms:
+                print(f"  cam{a}<->cam{b}: rms > {args.max_link_rms:.1f} px "
+                      f"-> link REJECTED (won't poison the chain)")
+                continue
             pairs[(a, b)] = r
-            used = min(r[3], args.max_pair_frames)
-            print(f"  cam{a}<->cam{b}: {r[3]} shared frames ({used} used), "
-                  f"stereo rms {r[2]:.3f} px, "
-                  f"baseline {np.linalg.norm(r[1]) * 100:.1f} cm")
     R, T, route = chain_extrinsics(cams, pairs, cams[0])
     for c in cams[1:]:
         if len(route[c]) > 2:

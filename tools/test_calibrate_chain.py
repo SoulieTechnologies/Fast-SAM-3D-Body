@@ -103,6 +103,25 @@ def main():
               f"trans err {dt * 1000:.4f} mm")
         assert ang < 0.01 and dt < 1e-3, f"cam{c}: ang {ang} dt {dt}"
 
+    # corrupt 5 of cam1's front-zone frames (corner ids shuffled = the
+    # grazing-view misdetection failure mode): the PnP/consensus gate must
+    # drop exactly those frames and keep the solve exact
+    bad = [n for n in sorted(set(dets[0]) & set(dets[1]))][:5]
+    rng = np.random.default_rng(1)
+    for n in bad:
+        ids = list(dets[1][n])
+        perm = rng.permutation(ids)
+        dets[1][n] = {i: dets[1][n][j] for i, j in zip(ids, perm)}
+    r = cm.pair_extrinsics(dets[0], dets[1], K, D, K, D, IMG_SIZE, CHESS,
+                           min_common=6, la=0, lb=1)
+    assert r is not None and r[2] < 0.1, f"rms after outliers: {r[2]}"
+    assert r[3] <= 12 - 5 + 1, f"corrupted frames not dropped: {r[3]} inliers"
+    Rg, Tg = gt_rel(1)
+    ang = np.degrees(np.arccos(np.clip((np.trace(r[0] @ Rg.T) - 1) / 2, -1, 1)))
+    assert ang < 0.01 and np.linalg.norm(r[1] - Tg) < 1e-3
+    print(f"  outlier rejection ok ({12 - r[3]} frames dropped, "
+          f"rms {r[2]:.4f} px)")
+
     # disconnect cam3 entirely -> must fail with a clear message
     try:
         cm.chain_extrinsics(cams, {k: v for k, v in pairs.items()
