@@ -95,9 +95,16 @@ def detect_all(cam, board, dictionary, min_corners):
     return out
 
 
-def pair_extrinsics(deta, detb, Ka, Da, Kb, Db, img_size, chess, min_common):
+def pair_extrinsics(deta, detb, Ka, Da, Kb, Db, img_size, chess, min_common,
+                    max_frames=40):
     """(R, T, rms, n_frames) with x_b = R @ x_a + T, or None if < 6 shared
-    frames. deta/detb: detect_all outputs for the two cameras."""
+    frames. deta/detb: detect_all outputs for the two cameras.
+
+    Shared frames are evenly subsampled to max_frames: stereoCalibrate
+    optimises 6 board-pose params PER VIEW, so its LM step scales badly
+    with the view count (150 views ~ 900 params = tens of minutes) while
+    the extrinsics themselves stop improving after a few dozen varied
+    views."""
     obj_all, pa_all, pb_all = [], [], []
     for name in sorted(set(deta) & set(detb)):
         common = sorted(set(deta[name]) & set(detb[name]))
@@ -110,12 +117,18 @@ def pair_extrinsics(deta, detb, Ka, Da, Kb, Db, img_size, chess, min_common):
                                np.float32).reshape(-1, 1, 2))
     if len(obj_all) < 6:
         return None
+    n_shared = len(obj_all)
+    if n_shared > max_frames:
+        idx = np.linspace(0, n_shared - 1, max_frames).astype(int)
+        obj_all = [obj_all[i] for i in idx]
+        pa_all = [pa_all[i] for i in idx]
+        pb_all = [pb_all[i] for i in idx]
     rms, *_, R, T, _, _ = cv2.stereoCalibrate(
         obj_all, pa_all, pb_all, Ka, Da, Kb, Db, img_size,
         flags=cv2.CALIB_FIX_INTRINSIC,
         criteria=(cv2.TERM_CRITERIA_MAX_ITER + cv2.TERM_CRITERIA_EPS, 100, 1e-5))
     return (R.astype(np.float64), T.reshape(3).astype(np.float64), rms,
-            len(obj_all))
+            n_shared)
 
 
 def chain_extrinsics(cams, pairs, ref):
@@ -162,6 +175,12 @@ def main():
     ap.add_argument("--out", default="calibration_data/multi_params.npz")
     ap.add_argument("--min-corners", type=int, default=6,
                     help="min ChArUco corners to accept a detection")
+    ap.add_argument("--max-pair-frames", type=int, default=40,
+                    help="evenly subsample the shared frames of each pair to "
+                         "this many before stereoCalibrate (its LM step has 6 "
+                         "board-pose params PER VIEW; beyond a few dozen "
+                         "varied views the extrinsics stop improving and the "
+                         "solve time explodes)")
     ap.add_argument("--min-common", type=int, default=6,
                     help="min corners shared cam0<->cam{c} to use a frame pair")
     ap.add_argument("--intr-flags", type=int, default=0,
@@ -193,13 +212,16 @@ def main():
         for j in range(i + 1, len(cams)):
             a, b = cams[i], cams[j]
             r = pair_extrinsics(dets[a], dets[b], K[a], D[a], K[b], D[b],
-                                img_size, chess, args.min_common)
+                                img_size, chess, args.min_common,
+                                args.max_pair_frames)
             if r is None:
                 print(f"  cam{a}<->cam{b}: <6 shared frames (skipped)")
                 continue
             pairs[(a, b)] = r
-            print(f"  cam{a}<->cam{b}: {r[3]} shared frames, stereo rms "
-                  f"{r[2]:.3f} px, baseline {np.linalg.norm(r[1]) * 100:.1f} cm")
+            used = min(r[3], args.max_pair_frames)
+            print(f"  cam{a}<->cam{b}: {r[3]} shared frames ({used} used), "
+                  f"stereo rms {r[2]:.3f} px, "
+                  f"baseline {np.linalg.norm(r[1]) * 100:.1f} cm")
     R, T, route = chain_extrinsics(cams, pairs, cams[0])
     for c in cams[1:]:
         if len(route[c]) > 2:
