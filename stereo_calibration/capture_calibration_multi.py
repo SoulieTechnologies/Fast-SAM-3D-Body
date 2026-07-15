@@ -31,6 +31,7 @@ Controls:
 Then:  python calibrate_multi.py --cams 0,2,4,6
 """
 import argparse
+import glob
 import os
 
 import cv2
@@ -89,6 +90,11 @@ for c in cam_ids:
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+    # keep at most 1 buffered frame: with a slow 4x1080p preview loop the
+    # default queue serves frames that are 100s of ms old, with a DIFFERENT
+    # age per camera -> a hand-held board lands at different poses in the
+    # same "simultaneous" set and the pairwise extrinsics are garbage
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     if args.exposure is not None:
         cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
         cap.set(cv2.CAP_PROP_EXPOSURE, args.exposure)
@@ -113,7 +119,13 @@ for c in cam_ids:
         print(f"  WARNING: cam{c} refused {args.width}x{args.height}")
     caps.append(cap)
 
-count = 0
+# resume numbering after any existing capture: sets ADD to the pool (drop
+# a bad zone by deleting its frame range; calibrate_multi pairs by filename)
+_existing = glob.glob("images/cam*/frame_*.png")
+count = 1 + max((int(os.path.basename(f)[6:10]) for f in _existing),
+                default=-1)
+if count:
+    print(f"resuming at set {count} ({len(_existing)} existing images kept)")
 sharp_peak = [0.0] * len(cam_ids)
 cur_exp = args.exposure if args.exposure is not None \
     else max(caps[0].get(cv2.CAP_PROP_EXPOSURE), 1.0)
@@ -171,7 +183,9 @@ def overlay(idx, frame, gray):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                 (0, 255, 0) if near else (0, 165, 255), 2)
     ok = ch is not None
+    cmap = {}
     if ok:
+        cmap = {int(ids[k]): ch[k].reshape(2) for k in range(len(ids))}
         for pt in ch.reshape(-1, 2):
             cv2.circle(disp, tuple(pt.astype(int)), 4, (0, 255, 0), -1)
         cv2.putText(disp, f"cam{cam_labs[idx]}  corners {len(ch)}/{N_CORNERS}",
@@ -179,7 +193,7 @@ def overlay(idx, frame, gray):
     else:
         cv2.putText(disp, f"cam{cam_labs[idx]}  no board", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-    return disp, ok
+    return disp, ok, cmap
 
 
 def grid(images):
@@ -204,17 +218,34 @@ WIN = "Multi-cam calibration  [s=save q=quit]"
 cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
 _win_sized = False
 
-print("Press 's' to save a frame set, 'q' to quit.")
+MOVE_TOL_PX = 4.0     # max corner motion since the previous preview frame
+prev_corners = [{} for _ in caps]
+
+print("Press 's' to save a frame set, 'q' to quit (hold the board STILL "
+      "when saving — the cameras are only soft-synced).")
 while True:
-    reads = [cap.read() for cap in caps]
+    # grab all cameras first (fast buffer dequeue, ~ms apart), THEN decode:
+    # sequential read() would stagger the actual capture instants
+    if not all(cap.grab() for cap in caps):
+        print("camera grab failed")
+        break
+    reads = [cap.retrieve() for cap in caps]
     if not all(r[0] for r in reads):
-        print("camera read failed")
+        print("camera retrieve failed")
         break
     frames = [cv2.rotate(f, cv2.ROTATE_180) if args.rotate180 else f
               for _, f in reads]
     grays = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in frames]
-    disps, oks = zip(*[overlay(i, frames[i], grays[i]) for i in range(len(caps))])
+    disps, oks, cmaps = zip(*[overlay(i, frames[i], grays[i])
+                              for i in range(len(caps))])
     disps = list(disps)
+    # board motion per cam = mean corner displacement vs previous iteration
+    motion = []
+    for i, cm in enumerate(cmaps):
+        common = set(cm) & set(prev_corners[i])
+        motion.append(float(np.mean([np.linalg.norm(cm[k] - prev_corners[i][k])
+                                     for k in common])) if common else None)
+        prev_corners[i] = cm
 
     exp_txt = (f"exp {cur_exp:.0f} gain {cur_gain:.0f}" if manual_exp
                else "exp auto")
@@ -242,8 +273,13 @@ while True:
     if key == ord('a'):
         set_exposure(auto=True)
     if key == ord('s'):
+        moving = [f"cam{cam_labs[i]} {m:.0f}px" for i, m in enumerate(motion)
+                  if oks[i] and m is not None and m > MOVE_TOL_PX]
         # any pair is useful: calibrate_multi chains pairwise links to cam0
-        if n_ok >= 2:
+        if moving:
+            print(f"not saved — board MOVING ({', '.join(moving)}): the "
+                  f"cameras are not hardware-synced, hold it still")
+        elif n_ok >= 2:
             saved = []
             for i, c in enumerate(cam_labs):
                 if oks[i]:
