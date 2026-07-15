@@ -814,12 +814,20 @@ class Viz:
         else:
             rr.save(os.path.join(output_dir, "session.rrd"))
         rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
+        cam_views = [rrb.Spatial2DView(origin=f"cams/cam{i}", name=f"Camera {i}")
+                     for i in range(ncam)]
+        if ncam > 2:            # 3-4 cams: 2-wide grid instead of a tall stack
+            cam_panel = rrb.Grid(*cam_views, grid_columns=2)
+            shares = [3, 1, 1]
+        else:
+            cam_panel = rrb.Vertical(*cam_views)
+            shares = [2 * max(ncam, 1), 1, 1]
         rr.send_blueprint(rrb.Blueprint(rrb.Horizontal(
             rrb.Vertical(
-                *[rrb.Spatial2DView(origin=f"cams/cam{i}", name=f"Camera {i}")
-                  for i in range(ncam)],
+                cam_panel,
                 rrb.Spatial2DView(origin="cams/hand_crops", name="Hand crops"),
                 rrb.TimeSeriesView(origin="timing", name="Latency (ms)"),
+                row_shares=shares,
             ),
             rrb.Spatial3DView(origin="world", name="3D (metric)",
                               background=rrb.Background(color=[25, 25, 25])),
