@@ -28,6 +28,7 @@ Outputs (in --output_dir):
   markers_3d.npy      (T, 43, 3)       metric 3D, cam0/world frame (MARKER_NAMES order)
   markers_2d.npy      (T, ncam, 43, 2)
   hands_2d.npy        (T, 42, 2)       best-view pixels (right 0-20, left 21-41)
+  hands_src.npy       (T, 2)           which camera hands_2d came from (R, L; -1 none)
   hands_2d_views.npy  (T, ncam, 42, 2) decoder pixels per view (stereo input)
   goliath70_3d.npy    (T, 70, 3)       markers mapped to Goliath + fused fingers
   timestamps.npy      (T,)
@@ -1150,7 +1151,8 @@ def main():
 
     rec = None
     if not args.no_record:
-        rec = {"b3d": [], "b2d": [], "h2d": [], "h2dv": [], "g70": [], "ts": []}
+        rec = {"b3d": [], "b2d": [], "h2d": [], "h2dv": [], "hsrc": [],
+               "g70": [], "ts": []}
     vw = None
 
     print("[4/4] LIVE — Ctrl+C to stop.")
@@ -1289,6 +1291,9 @@ def main():
                 rec["h2d"].append(h2d)
                 rec["h2dv"].append(hres["kp2d_views"] if hres is not None
                                    else np.full((ncam, 42, 2), np.nan, np.float32))
+                rec["hsrc"].append([
+                    -1 if hres is None or hres.get(k) is None else hres[k]
+                    for k in ("src_r", "src_l")])
                 rec["g70"].append(g70)
                 rec["ts"].append(t_wall)
             if args.save_video:
@@ -1345,6 +1350,8 @@ def main():
             np.save(os.path.join(out_dir, "markers_2d.npy"), np.stack(rec["b2d"]))
             np.save(os.path.join(out_dir, "hands_2d.npy"), np.stack(rec["h2d"]))
             np.save(os.path.join(out_dir, "hands_2d_views.npy"), np.stack(rec["h2dv"]))
+            np.save(os.path.join(out_dir, "hands_src.npy"),
+                    np.asarray(rec["hsrc"], np.int16))
             np.save(os.path.join(out_dir, "goliath70_3d.npy"), np.stack(rec["g70"]))
             np.save(os.path.join(out_dir, "timestamps.npy"), np.asarray(rec["ts"]))
             print(f"  saved {len(rec['ts'])} frames to {out_dir}/")
