@@ -118,7 +118,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[1],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cams", default="0,1,2,3",
-                    help="comma-separated camera ids; the first is the reference")
+                    help="comma-separated camera ids (or the same /dev paths "
+                         "given to capture_calibration_multi — a path maps to "
+                         "its POSITION, matching the images/cam{pos} folders); "
+                         "the first is the reference")
     ap.add_argument("--out", default="calibration_data/multi_params.npz")
     ap.add_argument("--min-corners", type=int, default=6,
                     help="min ChArUco corners to accept a detection")
@@ -128,7 +131,8 @@ def main():
                     help="cv2.calibrateCamera flags for the intrinsics step")
     args = ap.parse_args()
 
-    cams = [int(x) for x in args.cams.split(",")]
+    _toks = [x.strip() for x in args.cams.split(",")]
+    cams = [int(x) if x.isdigit() else i for i, x in enumerate(_toks)]
     if cams[0] != 0:
         print(f"NOTE: reference camera is cam{cams[0]}, but load_calibration "
               f"treats index 0 as the world frame — keep cam0 first.")

@@ -38,7 +38,10 @@ import board_config
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--cams", default="0,1,2,3",
-                help="comma-separated camera device indices; first = reference")
+                help="comma-separated camera indices OR /dev/v4l/by-id paths "
+                     "(stable across reboots — recommended with 4 identical "
+                     "cams); first = reference. A path is labelled/saved by "
+                     "its POSITION (images/cam{pos})")
 ap.add_argument("--min_corners", type=int, default=6)
 ap.add_argument("--width", type=int, default=1920)
 ap.add_argument("--height", type=int, default=1080)
@@ -50,11 +53,15 @@ ap.add_argument("--rotate180", action="store_true",
                      "then run with the same flag")
 args = ap.parse_args()
 
-cam_ids = [int(x) for x in args.cams.split(",")]
+# int token = device index (label = itself, unchanged); path token = opened
+# as-is by V4L2, labelled by its position so folders stay images/cam{N}
+_toks = [x.strip() for x in args.cams.split(",")]
+cam_ids = [int(x) if x.isdigit() else x for x in _toks]
+cam_labs = [c if isinstance(c, int) else i for i, c in enumerate(cam_ids)]
 board, dictionary = board_config.make_board()
 N_CORNERS = (board_config.BOARD_COLS - 1) * (board_config.BOARD_ROWS - 1)
 
-for c in cam_ids:
+for c in cam_labs:
     os.makedirs(f"images/cam{c}", exist_ok=True)
 
 caps = []
@@ -142,10 +149,10 @@ def overlay(idx, frame, gray):
     if ok:
         for pt in ch.reshape(-1, 2):
             cv2.circle(disp, tuple(pt.astype(int)), 4, (0, 255, 0), -1)
-        cv2.putText(disp, f"cam{cam_ids[idx]}  corners {len(ch)}/{N_CORNERS}",
+        cv2.putText(disp, f"cam{cam_labs[idx]}  corners {len(ch)}/{N_CORNERS}",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
     else:
-        cv2.putText(disp, f"cam{cam_ids[idx]}  no board", (10, 30),
+        cv2.putText(disp, f"cam{cam_labs[idx]}  no board", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
     return disp, ok
 
@@ -203,14 +210,14 @@ while True:
         # need the reference AND at least one partner so cam0 shares the board
         if oks[0] and n_ok >= 2:
             saved = []
-            for i, c in enumerate(cam_ids):
+            for i, c in enumerate(cam_labs):
                 if oks[i]:
                     cv2.imwrite(f"images/cam{c}/frame_{count:04d}.png", frames[i])
                     saved.append(c)
             print(f"saved set {count}: cams {saved}")
             count += 1
         else:
-            print(f"not saved — cam{cam_ids[0]} + >=1 other must see the board "
+            print(f"not saved — cam{cam_labs[0]} + >=1 other must see the board "
                   f"(cam0 ok={oks[0]}, total seen={n_ok})")
 
 for cap in caps:

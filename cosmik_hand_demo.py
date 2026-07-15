@@ -985,7 +985,10 @@ def _full_to_tile(pts, box, out_hw, padding=0.9, aspect=0.75):
 
 def main():
     p = argparse.ArgumentParser(description="NLF markers (multi-cam metric) + SAM hand decoder")
-    p.add_argument("--cams", default="0", help="comma-separated camera indices")
+    p.add_argument("--cams", default="0",
+                   help="comma-separated camera indices or /dev/v4l/by-id "
+                        "paths (stable across reboots; order must match the "
+                        "calibration npz K0..K{n})")
     p.add_argument("--calib", default="", help="calibration npz (see docstring); "
                    "required for >=2 cameras, optional in mono mode")
     p.add_argument("--fx", type=float, default=540.0,
@@ -1087,7 +1090,8 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    cam_idx = [int(x) for x in args.cams.split(",")]
+    cam_idx = [int(x) if x.strip().isdigit() else x.strip()
+               for x in args.cams.split(",")]
     ncam = len(cam_idx)
     if args.calib:
         Ks, Ds, Rs, Ts = load_calibration(args.calib, ncam)
