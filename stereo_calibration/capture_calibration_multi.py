@@ -7,10 +7,12 @@ generalisation. Capture resolution MUST match the resolution the demo runs at
 
 On 's', every camera that currently detects the board saves a frame under
 images/cam{c}/frame_{count}.png (same filename index across cameras, which is
-how calibrate_multi.py pairs them). A shot is only committed when cam0 (the
-reference) AND at least one other camera see the board — so cam0 always shares
-the board with each partner, which is what the pairwise extrinsics need. Aim to
-show the board to cam0 together with EACH other camera in turn.
+how calibrate_multi.py pairs them). A shot is committed when ANY 2+ cameras
+see the board: calibrate_multi solves every pair that shares frames and
+CHAINS the transforms to cam0, so the cameras only need to form a connected
+graph (e.g. front pair together, then front-left + side-left, then
+front-right + side-right). Direct cam0 overlap still gives the tightest
+extrinsics — prefer it when the geometry allows.
 
 Exposure/focus behave exactly like capture_calibration.py (V4L2 keeps settings
 across sessions; --auto-exposure resets, --exposure/--gain set the same manual
@@ -21,7 +23,7 @@ Usage:
     python capture_calibration_multi.py --cams 0,2,4,6 --width 1920 --height 1080
 
 Controls:
-    s    — save a frame set (cams that see the board; needs cam0 + >=1 other)
+    s    — save a frame set (cams that see the board; needs >=2 cameras)
     -/+  — exposure down/up on ALL cameras (x1.4 steps)
     [/]  — gain down/up on ALL cameras
     a    — auto exposure on ALL cameras
@@ -224,8 +226,8 @@ while True:
     if key == ord('a'):
         set_exposure(auto=True)
     if key == ord('s'):
-        # need the reference AND at least one partner so cam0 shares the board
-        if oks[0] and n_ok >= 2:
+        # any pair is useful: calibrate_multi chains pairwise links to cam0
+        if n_ok >= 2:
             saved = []
             for i, c in enumerate(cam_labs):
                 if oks[i]:
@@ -234,8 +236,8 @@ while True:
             print(f"saved set {count}: cams {saved}")
             count += 1
         else:
-            print(f"not saved — cam{cam_labs[0]} + >=1 other must see the board "
-                  f"(cam0 ok={oks[0]}, total seen={n_ok})")
+            print(f"not saved — >=2 cameras must see the board "
+                  f"(total seen={n_ok})")
 
 for cap in caps:
     cap.release()

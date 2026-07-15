@@ -11,14 +11,18 @@ Pipeline (self-contained — no need to run calibrate_single first):
   1. per-camera INTRINSICS from images/cam{c}/*.png (cv2.calibrateCamera on the
      ChArUco corners), unless calibration_data/cam{c}_intrinsics.npz exists
      (then it is reused, matching calibrate_single.py's output).
-  2. per-camera EXTRINSICS relative to cam0 via stereoCalibrate(cam0, cam{c})
-     with CALIB_FIX_INTRINSIC, over the frame pairs (matched by filename) where
-     BOTH cameras saw >= --min-common shared ChArUco corners.
+  2. PAIRWISE extrinsics via stereoCalibrate(cam{a}, cam{b}) with
+     CALIB_FIX_INTRINSIC over every camera pair that shares >= 6 frames
+     (matched by filename, >= --min-common shared ChArUco corners each),
+     then CHAINED to cam0 over the strongest links (max-shared-frames
+     spanning tree): a camera that never sees the board together with cam0
+     is still calibrated through any camera it does overlap with.
 
-Capture requirement: cam0 must share board views with EVERY other camera —
-during capture, place the board where cam0 and cam{c} both see it. For a wide
-ring where some camera never overlaps cam0, calibrate that camera against a
-neighbour it does overlap and chain the transforms by hand (not automated here).
+Capture requirement: the cameras must form a CONNECTED graph of shared board
+views (e.g. front pair together, front-left + side-left together, front-right
++ side-right together). NOT all cameras at once — any 2+ per saved set is
+enough. Direct overlap with cam0 is still best (each chain hop compounds its
+stereo error); the tool prints which cameras were chained and through what.
 
 Usage:
     python calibrate_multi.py --cams 0,1,2,3
@@ -79,39 +83,72 @@ def camera_intrinsics(cam, board, dictionary, min_corners, flags=0):
     return K.astype(np.float64), D.astype(np.float64), img_size, rms
 
 
-def extrinsics_to_ref(cam, K0, D0, Kc, Dc, img_size, board, dictionary,
-                      min_corners, min_common):
-    """R, T (cam0 -> cam{cam}) from stereoCalibrate over shared board frames."""
-    obj_all, p0_all, pc_all = [], [], []
-    base0 = {os.path.basename(p): p for p in glob.glob("images/cam0/*.png")}
-    basec = {os.path.basename(p): p for p in glob.glob(f"images/cam{cam}/*.png")}
-    chess = board.getChessboardCorners()
-    for name in sorted(set(base0) & set(basec)):
-        g0 = cv2.cvtColor(cv2.imread(base0[name]), cv2.COLOR_BGR2GRAY)
-        gc = cv2.cvtColor(cv2.imread(basec[name]), cv2.COLOR_BGR2GRAY)
-        ch0, id0 = _detect(g0, board, dictionary, min_corners)
-        chc, idc = _detect(gc, board, dictionary, min_corners)
-        if ch0 is None or chc is None:
-            continue
-        m0 = {int(id0[i]): ch0[i] for i in range(len(id0))}
-        mc = {int(idc[i]): chc[i] for i in range(len(idc))}
-        common = sorted(set(m0) & set(mc))
+def detect_all(cam, board, dictionary, min_corners):
+    """{frame basename: {corner id: (1,2) pixel}} for images/cam{cam}/*.png."""
+    out = {}
+    for p in sorted(glob.glob(f"images/cam{cam}/*.png")):
+        gray = cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2GRAY)
+        ch, ii = _detect(gray, board, dictionary, min_corners)
+        if ch is not None:
+            out[os.path.basename(p)] = {int(ii[k]): ch[k]
+                                        for k in range(len(ii))}
+    return out
+
+
+def pair_extrinsics(deta, detb, Ka, Da, Kb, Db, img_size, chess, min_common):
+    """(R, T, rms, n_frames) with x_b = R @ x_a + T, or None if < 6 shared
+    frames. deta/detb: detect_all outputs for the two cameras."""
+    obj_all, pa_all, pb_all = [], [], []
+    for name in sorted(set(deta) & set(detb)):
+        common = sorted(set(deta[name]) & set(detb[name]))
         if len(common) < min_common:
             continue
-        obj_all.append(chess[common].reshape(-1, 1, 3))
-        p0_all.append(np.array([m0[i] for i in common], np.float32))
-        pc_all.append(np.array([mc[i] for i in common], np.float32))
+        obj_all.append(chess[common].reshape(-1, 1, 3).astype(np.float32))
+        pa_all.append(np.array([deta[name][i] for i in common],
+                               np.float32).reshape(-1, 1, 2))
+        pb_all.append(np.array([detb[name][i] for i in common],
+                               np.float32).reshape(-1, 1, 2))
     if len(obj_all) < 6:
-        raise SystemExit(f"cam{cam}: only {len(obj_all)} frames share >= "
-                         f"{min_common} corners with cam0 — cam0 and cam{cam} "
-                         f"must both see the board more often")
+        return None
     rms, *_, R, T, _, _ = cv2.stereoCalibrate(
-        obj_all, p0_all, pc_all, K0, D0, Kc, Dc, img_size,
+        obj_all, pa_all, pb_all, Ka, Da, Kb, Db, img_size,
         flags=cv2.CALIB_FIX_INTRINSIC,
         criteria=(cv2.TERM_CRITERIA_MAX_ITER + cv2.TERM_CRITERIA_EPS, 100, 1e-5))
-    print(f"  cam0->cam{cam}: {len(obj_all)} shared frames, stereo rms "
-          f"{rms:.3f} px, baseline {np.linalg.norm(T) * 100:.1f} cm")
-    return R.astype(np.float64), T.reshape(3).astype(np.float64), rms
+    return (R.astype(np.float64), T.reshape(3).astype(np.float64), rms,
+            len(obj_all))
+
+
+def chain_extrinsics(cams, pairs, ref):
+    """World(=cam{ref})->cam R,T for every camera, chaining pairwise links.
+
+    pairs: {(a, b): (R, T, rms, n)} with x_b = R @ x_a + T. Greedy
+    max-shared-frames spanning tree from ref (strong links first, so a solid
+    two-hop chain beats a weak direct link). Returns (Rw, Tw, route) dicts;
+    raises SystemExit naming any camera not connected to ref.
+    """
+    adj = {}
+    for (a, b), (R, T, _, n) in pairs.items():
+        adj.setdefault(a, []).append((b, R, T, n))
+        adj.setdefault(b, []).append((a, R.T, -R.T @ T, n))    # inverted link
+    Rw, Tw = {ref: np.eye(3)}, {ref: np.zeros(3)}
+    route = {ref: [ref]}
+    while len(Rw) < len(cams):
+        best = None                    # (n_shared, from, to, R_ab, T_ab)
+        for a in list(Rw):
+            for b, R, T, n in adj.get(a, []):
+                if b not in Rw and (best is None or n > best[0]):
+                    best = (n, a, b, R, T)
+        if best is None:
+            missing = [c for c in cams if c not in Rw]
+            raise SystemExit(
+                f"cams {missing} share no board frames with any calibrated "
+                f"camera — capture sets linking them (any pair works, "
+                f"e.g. side cam together with its nearest front cam)")
+        _, a, b, R, T = best
+        Rw[b] = R @ Rw[a]
+        Tw[b] = R @ Tw[a] + T
+        route[b] = route[a] + [b]
+    return Rw, Tw, route
 
 
 def main():
@@ -138,20 +175,38 @@ def main():
               f"treats index 0 as the world frame — keep cam0 first.")
     board, dictionary = board_config.make_board()
 
-    print(f"[1/2] Intrinsics for {len(cams)} cameras...")
+    print(f"[1/3] Intrinsics for {len(cams)} cameras...")
     K, D, img_size = {}, {}, None
     for c in cams:
         res = camera_intrinsics(c, board, dictionary, args.min_corners,
                                 args.intr_flags)
         K[c], D[c], img_size = res[0], res[1], res[2]
 
-    print(f"[2/2] Extrinsics relative to cam{cams[0]}...")
-    R = {cams[0]: np.eye(3)}
-    T = {cams[0]: np.zeros(3)}
+    print("[2/3] Corner detections (cached per frame)...")
+    dets = {c: detect_all(c, board, dictionary, args.min_corners)
+            for c in cams}
+    chess = board.getChessboardCorners()
+
+    print(f"[3/3] Pairwise extrinsics, chained to cam{cams[0]}...")
+    pairs = {}
+    for i in range(len(cams)):
+        for j in range(i + 1, len(cams)):
+            a, b = cams[i], cams[j]
+            r = pair_extrinsics(dets[a], dets[b], K[a], D[a], K[b], D[b],
+                                img_size, chess, args.min_common)
+            if r is None:
+                print(f"  cam{a}<->cam{b}: <6 shared frames (skipped)")
+                continue
+            pairs[(a, b)] = r
+            print(f"  cam{a}<->cam{b}: {r[3]} shared frames, stereo rms "
+                  f"{r[2]:.3f} px, baseline {np.linalg.norm(r[1]) * 100:.1f} cm")
+    R, T, route = chain_extrinsics(cams, pairs, cams[0])
     for c in cams[1:]:
-        R[c], T[c], _ = extrinsics_to_ref(
-            c, K[cams[0]], D[cams[0]], K[c], D[c], img_size, board, dictionary,
-            args.min_corners, args.min_common)
+        if len(route[c]) > 2:
+            hops = " -> ".join(f"cam{x}" for x in route[c])
+            print(f"  cam{c}: CHAINED {hops} (each hop compounds its stereo "
+                  f"error — direct shared views with cam{cams[0]} would "
+                  f"tighten it)")
 
     out = {}
     for i, c in enumerate(cams):                         # save in 0..n order
