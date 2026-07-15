@@ -142,10 +142,37 @@ def test_ray_dependence():
     print("  ray dependence ok")
 
 
+
+
+def test_ray_diversity():
+    from hand_view_select import _sin_angle
+    assert _sin_angle([1, 0, 0], [0, 1, 0]) == 1.0
+    assert _sin_angle([1, 0, 0], [2, 0, 0]) < 1e-9
+    centers = {0: [-0.6, 1.6, 2.5], 1: [0.6, 1.6, 2.5],
+               2: [-2.5, 1.6, 0.0], 3: [2.5, 1.6, 0.0]}
+    rays = {v: WRIST - np.asarray(c, float) for v, c in centers.items()}
+    # equal scores: the second pick must avoid the near-parallel front pair
+    cands = {v: {"size": 200.0, "vis": None, "conf": None, "in_frame": None}
+             for v in centers}
+    sel, _, _ = select_views(cands, 2, rays=rays)
+    assert sel[0] == 0 and sel[1] in (2, 3), f"wide pair expected: {sel}"
+    # but a clearly better view still beats diversity (side cams edge-on)
+    cands = {0: {"size": 200.0, "vis": 0.8, "conf": 1.0, "in_frame": 1.0},
+             1: {"size": 200.0, "vis": 0.8, "conf": 1.0, "in_frame": 1.0},
+             3: {"size": 200.0, "vis": 0.05, "conf": 1.0, "in_frame": 1.0}}
+    sel, _, _ = select_views(cands, 2, rays=rays)
+    assert set(sel) == {0, 1}, f"edge-on side cam must still lose: {sel}"
+    # no rays -> plain top-k unchanged
+    sel, _, _ = select_views(cands, 2)
+    assert set(sel) == {0, 1}
+    print("  ray diversity ok")
+
+
 if __name__ == "__main__":
     test_palm_normal()
     test_visibility_front_vs_side()
     test_in_frame_fraction()
     test_ranking_and_hysteresis()
     test_ray_dependence()
+    test_ray_diversity()
     print("all view-selection tests passed")

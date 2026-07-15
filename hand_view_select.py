@@ -41,6 +41,13 @@ import numpy as np
 # floors keep one bad-but-recoverable factor from vetoing a view outright
 VIS_FLOOR = 0.25
 CONF_FLOOR = 0.25
+# ray-diversity strength: after the best view is picked, a candidate whose
+# camera->wrist ray is PARALLEL to an already-selected one is scaled by
+# (1 - DIVERSITY); an orthogonal ray keeps its full score. Two near-parallel
+# rays (e.g. the two front cameras) triangulate depth poorly — DLT
+# conditioning goes with sin(angle) — so near-ties break toward a wide pair,
+# while a genuinely better view (flat vs edge-on) still wins.
+DIVERSITY = 0.35
 
 
 def palm_normal(wrist, thumb, pinky):
@@ -119,7 +126,39 @@ def rank_views(cands, prev=(), switch_bonus=1.15):
     return order, scores
 
 
-def select_views(cands, k, prev=(), switch_bonus=1.15):
-    """Top-k views for one hand (set), plus the full ranking for fallbacks."""
+def _sin_angle(a, b):
+    """sin of the angle between two 3D rays (1 = orthogonal, 0 = parallel)."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    d = np.linalg.norm(a) * np.linalg.norm(b)
+    if d < 1e-9:
+        return 1.0
+    return float(min(np.linalg.norm(np.cross(a, b)) / d, 1.0))
+
+
+def select_views(cands, k, prev=(), switch_bonus=1.15, rays=None):
+    """Top-k views for one hand, plus the full ranking for fallbacks.
+
+    rays: optional {view: camera->wrist direction, any common frame} — enables
+    the greedy ray-diversity pass (see DIVERSITY): the best view is taken
+    outright, then each further pick discounts candidates by how parallel
+    their ray is to the closest already-selected one.
+    """
     order, scores = rank_views(cands, prev, switch_bonus)
-    return order[:max(k, 0)], order, scores
+    k = max(k, 0)
+    if rays is None or k <= 1 or len(order) <= k:
+        return order[:k], order, scores
+    sel, rest = [order[0]], list(order[1:])
+    while rest and len(sel) < k:
+        best_v, best_e = None, -1.0
+        for v in rest:
+            e = scores[v]
+            if v in rays:
+                sels = [s for s in sel if s in rays]
+                if sels:
+                    minsin = min(_sin_angle(rays[v], rays[s]) for s in sels)
+                    e *= 1.0 - DIVERSITY * (1.0 - minsin)
+            if e > best_e:
+                best_v, best_e = v, e
+        sel.append(best_v)
+        rest.remove(best_v)
+    return sel, order, scores

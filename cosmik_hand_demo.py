@@ -609,6 +609,11 @@ class HandWorker(threading.Thread):
                  ("l", L_WRIST_PAIR, L_PALM, L_HAND_MARKERS))):
             wri = _pair_mid(res["kp3d"], *pair)
             n = palm_normal(wri, res["kp3d"][palm[0]], res["kp3d"][palm[1]])
+            # camera->wrist rays (world frame) for the triangulation-diversity
+            # pass: don't pair two near-parallel views (poor depth)
+            rays = None
+            if np.isfinite(wri).all():
+                rays = {v: wri - (-Rs[v].T @ Ts[v]) for v in views}
             cands = {}
             for v in views:
                 side = (sides or {}).get(v, (None, None))[hi]
@@ -622,7 +627,7 @@ class HandWorker(threading.Thread):
                 }
             sel, rank, _ = select_views(cands, self.topk,
                                         self._sel_prev[hand],
-                                        a.hand_switch_bonus)
+                                        a.hand_switch_bonus, rays=rays)
             self._sel_prev[hand] = set(sel)
             picked[hand], order[hand] = set(sel), rank
         want = {v: (v in picked["r"], v in picked["l"]) for v in views}
