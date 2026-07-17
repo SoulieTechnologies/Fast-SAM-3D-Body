@@ -1,33 +1,47 @@
 #!/usr/bin/env python3
-"""ROS 2 driver node for the REAL Orca hand (orca_core over USB dynamixel).
+"""Driver node for the REAL Orca hand (orca_core over USB dynamixel).
 
-    JointState on --topic (from hand_teleop_node.py: URDF names, radians)
+    JointState on --topic (ROS 2)  OR  q stream on --listen-q (plain TCP,
+    from hand_teleop_node.py --no-ros --emit-q: radians, joint_map key order)
         → joint_map yaml (URDF name → orca_core name, sign, offset, rad→deg)
         → per-tick velocity clamp (deg/s)
         → OrcaHand.set_joint_pos({orca_name: deg})
 
-This node deliberately knows NOTHING about the MPC — it only needs rclpy +
-orca_core (+ pyyaml/numpy), so it runs in the lab's orca_core env while
-hand_teleop_node runs in the acados env. The two only meet on the ROS topic.
+This node deliberately knows NOTHING about the MPC — it only needs orca_core
+(+ pyyaml, and rclpy only for the ROS mode), so it runs wherever the hand is
+plugged in (the orca_core venv) while hand_teleop_node runs in the acados
+env, possibly on another machine. The TCP mode exists because rclpy is not
+importable from the acados env (py3.11) nor on the Mac — same hop as
+sharpa_tcp_driver.py. Index alignment of the TCP stream is by construction:
+hand_teleop_node publishes in _orca_publish_order() = the key order of the
+SAME joint_map yaml this driver maps with.
 
 Safety layers (in order):
   - first command starts from the hand's MEASURED pose (get_joint_pos), so
     the velocity clamp ramps smoothly from wherever the hand actually is
   - per-tick joint velocity clamp (--vmax-deg, deg/s) on every command
   - targets clipped to the calibrated joint ROMs (orca_core clips again)
-  - NaN / unmapped joints skipped (the locked wrist is never commanded)
+  - NaN / unmapped / out-of-range (|q|>π) joints skipped (the locked wrist
+    is never commanded)
   - no target yet → no writes (torque-on hold at the current pose)
   - targets stale > --idle s (teleop node died) → ramp to config neutral
   - shutdown / crash → disable torque + disconnect (finally block)
 
-Run (orca_core env, ROS 2 sourced; hand must be calibrated once beforehand
-with orca_core/scripts/calibrate.py):
-  python orca_hand_driver_node.py --model ~/code/orca_core/orca_core/models/orcahand_v1_right
-Dry-run without the hand (prints the deg commands, validates topic+mapping):
-  python orca_hand_driver_node.py --dry
+Run — TCP mode, hand on this machine's USB (orca_core venv; hand calibrated
+once beforehand with orca_core/scripts/calibrate.py), teleop node elsewhere:
+  python orca_hand_driver_node.py --listen-q crslab:8093
+Full offline rehearsal (simulated motors, REAL config+calibration mapping):
+  python orca_hand_driver_node.py --mock --listen-q localhost:8093
+  python orca_hand_driver_node.py --mock --no-ros      # synthetic wave
+ROS mode (orca_core env WITH rclpy, e.g. hand plugged into the lab PC):
+  python orca_hand_driver_node.py
+Dry-run without orca_core at all (prints commands, validates the mapping):
+  python orca_hand_driver_node.py --dry --no-ros
 """
 import argparse
 import math
+import socket
+import struct
 import threading
 import time
 from pathlib import Path
@@ -68,6 +82,9 @@ class OrcaHandDriver:
 
         if args.dry:
             self.hand = FakeHand()
+        elif args.mock:
+            from orca_core import MockOrcaHand
+            self.hand = MockOrcaHand(args.model or None)
         else:
             from orca_core import OrcaHand
             self.hand = OrcaHand(args.model or None)
@@ -86,6 +103,11 @@ class OrcaHandDriver:
 
         # start the ramp from the MEASURED pose so the first command never jumps
         meas = self.hand.get_joint_pos(as_list=False)
+        uncal = sorted(j for j in mapped if meas.get(j) is None)
+        if uncal:
+            raise RuntimeError(
+                f"joints without a calibrated reading: {uncal} — run "
+                "orca_core/scripts/calibrate.py before teleop")
         self.cmd = {j: float(meas[j]) for j in mapped}      # last commanded, deg
         print(f"driving {len(mapped)} joints from measured pose "
               f"(wrist untouched); vmax {args.vmax_deg:.0f} deg/s")
@@ -113,8 +135,8 @@ class OrcaHandDriver:
             des, status = {}, "track"
             for u, rad in target.items():
                 m = self.jmap.get(u)
-                if m is None or not math.isfinite(rad):
-                    continue                       # wrist / unknown / NaN
+                if m is None or not math.isfinite(rad) or abs(rad) > 3.2:
+                    continue      # wrist / unknown / NaN / garbage (>π rad)
                 name, sign, off = m
                 lo, hi = self.roms[name]
                 des[name] = min(max(sign * math.degrees(rad) + off, lo), hi)
@@ -137,6 +159,62 @@ class OrcaHandDriver:
             print("torque disabled, disconnected")
         except Exception as e:
             print(f"disconnect failed: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TCP wrapper — consumes hand_teleop_node --emit-q, no ROS anywhere
+# (same wire format + reconnect loop as sharpa_tcp_driver.py)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _rx_q_thread(host, port, names, core):
+    """[>I frame][len(names)×'<f4' radians] → core.on_joint_state.
+    Positions are index-aligned with `names` (joint_map key order — the node
+    publishes in _orca_publish_order(), read from the same yaml)."""
+    nmsg = 4 + len(names) * 4
+    fmt = f"<{len(names)}f"
+    while True:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.connect((host, port))
+            print(f"connected to {host}:{port}")
+            buf = b""
+            while True:
+                d = s.recv(65536)
+                if not d:
+                    raise ConnectionError
+                buf += d
+                msg = None
+                while len(buf) >= nmsg:            # keep only the newest frame
+                    msg = buf[:nmsg]
+                    buf = buf[nmsg:]
+                if msg is not None:
+                    core.on_joint_state(names, struct.unpack(fmt, msg[4:]))
+        except OSError:
+            time.sleep(1.0)
+
+
+def run_tcp(core, args):
+    host, port = args.listen_q.rsplit(":", 1)
+    names = list(core.jmap.keys())                 # yaml insertion order
+    threading.Thread(target=_rx_q_thread, args=(host, int(port), names, core),
+                     daemon=True).start()
+    print(f"listening for q on tcp {host}:{port} ({len(names)} joints), "
+          f"writing at {1/args.dt:.0f} Hz")
+    last_status, n = "", 0
+    try:
+        while True:
+            t0 = time.time()
+            status = core.tick(t0)
+            if status != last_status:
+                print(f"state: {status}", flush=True)
+                last_status = status
+            n += 1
+            if n % 250 == 0:
+                head = {k: round(v, 1) for k, v in list(core.cmd.items())[:4]}
+                print(f"  [{status}] {head} ...", flush=True)
+            time.sleep(max(0.0, args.dt - (time.time() - t0)))
+    finally:
+        core.shutdown()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -185,8 +263,7 @@ def run_dry_loop(core, args):
             core.on_joint_state(urdf_names, [rad] * len(urdf_names))
             status = core.tick(time.time())
             if n % 25 == 0:
-                sent = getattr(core.hand, "_last", {})
-                head = {k: round(v, 1) for k, v in list(sent.items())[:4]}
+                head = {k: round(v, 1) for k, v in list(core.cmd.items())[:4]}
                 print(f"  [{status}] {head} ...", flush=True)
             n += 1
             time.sleep(args.dt)
@@ -196,11 +273,18 @@ def run_dry_loop(core, args):
 
 def main():
     p = argparse.ArgumentParser(description="Orca hand ROS 2 driver (orca_core)")
-    p.add_argument("--model", default="",
-                   help="orcahand model folder for OrcaHand() (default: orca_core's default)")
+    p.add_argument("--model", default="orcahand_v1_right",
+                   help="orcahand model name or folder for OrcaHand() — NB "
+                        "orca_core's own default sorts orcahand_v1_LEFT first")
     p.add_argument("--map", default=str(_HERE / "joint_map_v1_right.yaml"),
                    help="yaml {urdf_joint: {joint, sign, offset_deg}}")
     p.add_argument("--topic", default="/orca/joint_states_target")
+    p.add_argument("--listen-q", default="",
+                   help="host:port of hand_teleop_node --emit-q → consume the "
+                        "command stream over TCP instead of a ROS topic")
+    p.add_argument("--mock", action="store_true",
+                   help="orca_core MockOrcaHand: simulated motors, REAL "
+                        "config/calibration mapping (full rehearsal, no hand)")
     p.add_argument("--dt", type=float, default=0.04, help="serial write period (s)")
     p.add_argument("--vmax-deg", type=float, default=200.0,
                    help="max commanded joint velocity (deg/s) — also the ramp")
@@ -211,15 +295,23 @@ def main():
                    help="with --dry: synthetic wave instead of a ROS subscription")
     args = p.parse_args()
 
-    if args.no_ros and not args.dry:
-        # check BEFORE constructing the driver — it connects + enables torque
-        raise SystemExit("--no-ros requires --dry (never wave the real hand blind)")
+    # checks BEFORE constructing the driver — it connects + enables torque
+    if args.no_ros and not (args.dry or args.mock):
+        raise SystemExit("--no-ros requires --dry or --mock "
+                         "(never wave the real hand blind)")
+    if args.dry and args.mock:
+        raise SystemExit("--dry and --mock are mutually exclusive")
 
     core = OrcaHandDriver(args)
-    if args.no_ros:
-        run_dry_loop(core, args)
-    else:
-        run_ros(core, args)
+    try:
+        if args.no_ros:
+            run_dry_loop(core, args)
+        elif args.listen_q:
+            run_tcp(core, args)
+        else:
+            run_ros(core, args)
+    except KeyboardInterrupt:
+        pass                       # shutdown ran in the loop's finally block
 
 
 if __name__ == "__main__":

@@ -95,6 +95,15 @@ TIP_OFFSETS_CALIB = {
     "pinky":  np.array([-0.0085, 0.0000, 0.0330]),
 }
 
+def _orca_publish_order():
+    """URDF joint names in joint_map_v1_right.yaml key order — the SAME file
+    orca_hand_driver_node maps with, so the --emit-q TCP stream (positions
+    only, no names) is index-aligned with the driver by construction."""
+    import yaml
+    return tuple(yaml.safe_load(
+        (_HERE / "joint_map_v1_right.yaml").read_text()))
+
+
 def _orca_frames():
     f = {
         "thumb":  {"mcp": "R-T-AP_a9723101", "pip": "T-PP_68395e98",
@@ -189,6 +198,7 @@ HANDS = {
         wrist_joint_hint="to_TopTower",
         tip_offsets=TIP_OFFSETS_CALIB,
         default_topic="/orca/joint_states_target",
+        publish_order=_orca_publish_order(),
     ),
     "sharpa": HandConfig(
         name="sharpa",

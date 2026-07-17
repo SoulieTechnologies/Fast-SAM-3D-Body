@@ -12,8 +12,10 @@ retarget_mpc.py / hand_teleop_node.py              (acados env)
     palm alignment + human→robot scale  →  fingertip MPC  →  JointState
     │
     ├─ --hand orca  → /orca/joint_states_target (rad, URDF names)
+    │                 or --emit-q 8093 (TCP: rad, joint_map key order)
     │       ▼
-    │  orca_hand_driver_node.py                    (orca_core env)
+    │  orca_hand_driver_node.py                    (orca_core env/venv)
+    │      ROS topic OR --listen-q host:8093 (no ROS anywhere)
     │      joint map yaml (URDF→orca names, rad→deg, sign/offset)
     │      → vel clamp → OrcaHand.set_joint_pos
     │
@@ -29,7 +31,7 @@ retarget_mpc.py / hand_teleop_node.py              (acados env)
 |---|---|
 | `retarget_mpc.py` | The retargeting core + a **viser** UI: red = target tips, green = URDF tips (FK), per-finger sliders to calibrate the tip offsets live. `--replay goliath70_3d.npy` or `--listen host:port`. |
 | `hand_teleop_node.py` | **ROS 2 node** for the real hand. Reuses `retarget_mpc`'s MPC; adds safety layers (startup ramp, velocity clamp, stale→hold, release→neutral, solver-fail→hold). `--no-ros` for a dry run. |
-| `orca_hand_driver_node.py` | **ROS 2 driver** for the physical hand: subscribes the JointState, maps URDF→`orca_core` joints via the yaml, velocity-clamps, writes `OrcaHand.set_joint_pos()`. Needs only `rclpy` + `orca_core` (no acados). `--dry` for hardware-less testing. |
+| `orca_hand_driver_node.py` | **Driver** for the physical hand: consumes the JointState topic (ROS mode) or the `--emit-q` TCP stream (`--listen-q host:port`, no ROS — the mode to use when the hand's machine has no rclpy, e.g. the Mac), maps URDF→`orca_core` joints via the yaml, velocity-clamps, writes `OrcaHand.set_joint_pos()`. Needs only `orca_core` (+ `rclpy` for ROS mode). `--dry` = no orca_core at all; `--mock` = orca_core's simulated motors with the REAL config+calibration (full rehearsal). |
 | `joint_map_v1_right.yaml` | URDF CAD-hash names → `orca_core` names, with per-joint `sign` / `offset_deg` (⚠ abduction signs unverified — see bring-up). |
 | `orcahand/` | Vendored URDF + STL meshes (right hand, 17 revolute joints; the `to_TopTower` wrist joint is locked → nq=16). |
 | `sharpawave/` | Vendored Sharpa Wave right-hand URDF + meshes (from sharpa-robotics/sharpa-urdf-usd-xml, `package://` paths rewritten relative; 22 revolute joints, real `*_fingertip` frames → tip offsets default to 0). |
@@ -95,18 +97,23 @@ targets stale > `--idle` → ramp to config neutral, shutdown → torque off.
    inferred offline (symmetric ROMs). Move each joint with `orca_core/scripts/slider_joint.py`
    and compare with the URDF direction in the viser view (`retarget_mpc.py --replay ...`).
    Flip `sign:` / tweak `offset_deg:` in the yaml as needed.
-3. **Dry-run the driver** (no hardware): `python orca_hand_driver_node.py --dry --no-ros`
-   feeds a synthetic flexion wave through the full mapping+clamp path and prints the
-   deg commands. With ROS: `--dry` alone subscribes the real topic but only prints.
-4. **Full chain**, 3 terminals:
+3. **Rehearse without the hand**: `python orca_hand_driver_node.py --mock --no-ros`
+   feeds a synthetic flexion wave through the full mapping+clamp path AND the real
+   config/calibration (simulated motors); `--dry --no-ros` does the same without
+   orca_core installed. With ROS: `--dry` alone subscribes the real topic but only prints.
+4. **Full chain (TCP mode — hand plugged into a machine without ROS, e.g. the Mac)**:
    ```bash
-   # ① perception (GPU env, repo root)
+   # ① perception (crslab, GPU env, repo root)
    python cosmik_hand_demo.py --emit-hand-port 8092 ...
-   # ② MPC teleop node (acados env + ROS 2 sourced)
-   python hand_teleop_node.py --listen localhost:8092
-   # ③ hand driver (orca_core env + ROS 2 sourced) — start with a LOW vmax
-   python orca_hand_driver_node.py --model <path/to/orcahand_v1_right> --vmax-deg 60
+   # ② MPC teleop node (crslab, acados env) — no ROS, mirror q over TCP
+   python hand_teleop_node.py --listen localhost:8092 --no-ros --emit-q 8093
+   # ③ hand driver (hand's machine, orca_core venv) — start with a LOW vmax
+   python orca_hand_driver_node.py --listen-q crslab:8093 --vmax-deg 60
    ```
+   The TCP stream carries positions only — index alignment with the driver is
+   guaranteed because both ends read `joint_map_v1_right.yaml`
+   (`_orca_publish_order()` in `retarget_mpc.py` = the yaml's key order).
+   ROS variant: source ROS 2 in ② and ③, drop `--no-ros`/`--emit-q`/`--listen-q`.
    Keep a hand on the e-stop / USB cable for the first run; raise `--vmax-deg`
    (default 200) once the motion looks right.
 
