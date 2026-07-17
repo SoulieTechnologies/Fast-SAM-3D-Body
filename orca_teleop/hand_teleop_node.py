@@ -115,7 +115,7 @@ class HandTeleop:
     def step(self, now):
         """One control tick → (q_command, status_str). Never raises."""
         a = self.args
-        kp = _RX["kp"]
+        kp = _RX["data"]
         stale = now - self.last_kp_t
 
         if kp is None or stale > a.release:
