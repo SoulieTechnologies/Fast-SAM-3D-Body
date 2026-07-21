@@ -21,6 +21,36 @@ scripts/        runnable entry points
 data/           takes, exports, generated CSV/PNG, the workbook
 ```
 
+## Raw (unlabelled) Motive take → angles — the working path
+
+Motive exports raw, ID-unstable point clouds (a marker gets a new id on every
+reappearance). Workflow:
+
+```
+# 1. label the 21 markers once on the flat calibration frame (interactive)
+python scripts/label_seed.py data/<take>.csv            # -> <take>_seed.npz
+# 2. track from the seed (per-frame INDEPENDENT registration, no drift) + angles
+python scripts/process_hand.py data/<take>.csv --seed data/<take>_seed.npz --hand left
+# optional: see where tracking is weak
+python scripts/track_review.py data/<take>.csv data/<take>_seed.npz
+```
+
+`track_hand_independent` registers a DISTINCTIVE palm anchor (wrist + thumb +
+finger MCPs) to each frame on its own — no temporal propagation, so a bad frame
+never corrupts later ones — then a per-finger chain search (fixed seed bone
+lengths, "try combinations, keep the best skeleton fit") places PIP/DIP/tip.
+On the gabin left-hand take this gives ~84% correct bones (vs 26% for
+frame-to-frame trackers) and yields **clean, readable flexion segments** during
+the finger-test windows.
+
+Known limit: ~50% per-frame coverage, and a minority of segments have
+systematic mislabels (a wrong finger chain with correct bone lengths → a
+smooth-but-wrong angle that no bone/position/temporal filter catches). Use the
+clean segments for the SAM3D comparison; re-label a bad window with
+`label_seed.py --frame N --append <take>_seed.npz` (multi-seed) or, best, feed
+Motive's own labelled-marker tracking. Cleaner capture (mask reflections, kill
+the bracelet ghosts, better fixation) lifts every method.
+
 ## The reference pipeline
 
 ```
