@@ -1,119 +1,118 @@
-"""
-Record synchronized stereo video from both cameras.
+"""Record synchronized 1080p stereo video from two cameras, feed flipped 180
+(to match the upside-down calibrated mounting). Saves locally to
+recordings/<name>/cam0.mp4 & cam1.mp4 for offline inference.
 
-Usage:
-    python record_stereo.py --cam0 0 --cam1 1 --name subject_01
+    python record_stereo.py --cam0 0 --cam1 1 --name take_01
 
-Output:
-    recordings/<name>/cam0.mp4
-    recordings/<name>/cam1.mp4
+The 180 flip is BAKED into the files, so downstream you read them as-is:
+    python extract_two_cameras.py --cam0 recordings/take_01/cam0.mp4 \
+        --cam1 recordings/take_01/cam1.mp4 --stereo <stereo_params.npz> ...
 
-Controls:
-    r  — start / stop recording
-    q  — quit (saves if recording)
+Controls:  r = start/stop recording   q = quit (saves if recording)
 """
 import argparse
 import os
-import time
 import threading
+import time
+
 import cv2
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--cam0", type=int, default=0)
-parser.add_argument("--cam1", type=int, default=1)
-parser.add_argument("--name", type=str, default=time.strftime("%Y%m%d_%H%M%S"))
-parser.add_argument("--fps", type=float, default=30.0)
-args = parser.parse_args()
+p = argparse.ArgumentParser()
+p.add_argument("--cam0", type=int, default=0)
+p.add_argument("--cam1", type=int, default=1)
+p.add_argument("--name", default=time.strftime("%Y%m%d_%H%M%S"))
+p.add_argument("--fps", type=float, default=30.0)
+args = p.parse_args()
 
+W, H = 1920, 1080
 out_dir = os.path.join("recordings", args.name)
 os.makedirs(out_dir, exist_ok=True)
 
-cap0 = cv2.VideoCapture(args.cam0)
-cap1 = cv2.VideoCapture(args.cam1)
-for cap in (cap0, cap1):
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+def open_cam(idx):
+    cap = cv2.VideoCapture(idx)
+    if not cap.isOpened():
+        raise SystemExit(f"cannot open camera {idx}")
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, W)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, H)
     cap.set(cv2.CAP_PROP_FPS, args.fps)
+    print(f"  cam {idx}: {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
+          f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}")
+    return cap
+
+
+cap0, cap1 = open_cam(args.cam0), open_cam(args.cam1)
+
+frame0 = frame1 = None
+lock = threading.Lock()
+stop = threading.Event()
+
+
+def grab_loop():
+    global frame0, frame1
+    while not stop.is_set():
+        cap0.grab()
+        cap1.grab()                       # grab both, then retrieve both (sync)
+        r0, f0 = cap0.retrieve()
+        r1, f1 = cap1.retrieve()
+        if r0 and r1:
+            with lock:                    # flip 180 baked in
+                frame0 = cv2.rotate(f0, cv2.ROTATE_180)
+                frame1 = cv2.rotate(f1, cv2.ROTATE_180)
+
+
+threading.Thread(target=grab_loop, daemon=True).start()
+time.sleep(0.3)
 
 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 writer0 = writer1 = None
 recording = False
-frame_count = 0
-
-# Lock-stepped reads in a background thread for tightest sync
-frame0 = frame1 = None
-lock = threading.Lock()
-stop_event = threading.Event()
-
-def grab_loop():
-    global frame0, frame1
-    while not stop_event.is_set():
-        r0, f0 = cap0.read()
-        r1, f1 = cap1.read()
-        if r0 and r1:
-            with lock:
-                frame0, frame1 = f0, f1
-
-grabber = threading.Thread(target=grab_loop, daemon=True)
-grabber.start()
-
-# Wait for first frames
-time.sleep(0.2)
-
-print(f"Output → {out_dir}/cam0.mp4  &  cam1.mp4")
-print("Press 'r' to start/stop recording, 'q' to quit.")
-
-WINNAME = "Stereo Record  [r=rec  q=quit]"
-cv2.namedWindow(WINNAME, cv2.WINDOW_NORMAL)
-placeholder = __import__("numpy").zeros((720, 2560, 3), dtype="uint8")
-cv2.putText(placeholder, "Waiting for cameras...", (80, 360),
-            cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 200, 255), 3)
-cv2.imshow(WINNAME, placeholder)
+n = 0
+print(f"Output -> {out_dir}/cam0.mp4 & cam1.mp4  (1920x1080, flipped 180)")
+print("r = start/stop,  q = quit")
+WIN = "Stereo Record  [r=rec q=quit]"
+cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
 
 while True:
     with lock:
-        f0 = frame0.copy() if frame0 is not None else None
-        f1 = frame1.copy() if frame1 is not None else None
-
+        f0 = None if frame0 is None else frame0.copy()
+        f1 = None if frame1 is None else frame1.copy()
     if f0 is None or f1 is None:
-        cv2.imshow(WINNAME, placeholder)
-        key = cv2.waitKey(30) & 0xFF
-        if key == ord('q'):
+        if (cv2.waitKey(30) & 0xFF) == ord("q"):
             break
         continue
 
-    if recording and writer0:
+    if recording and writer0 is not None:
         writer0.write(f0)
         writer1.write(f1)
-        frame_count += 1
+        n += 1
 
-    disp0, disp1 = f0.copy(), f1.copy()
-    status = f"REC  {frame_count} frames" if recording else "READY — press r"
-    color  = (0, 0, 255) if recording else (0, 255, 0)
-    for d in (disp0, disp1):
-        cv2.putText(d, status, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
+    d0, d1 = f0.copy(), f1.copy()
+    txt = f"REC {n}" if recording else "READY - press r"
+    col = (0, 0, 255) if recording else (0, 255, 0)
+    for d in (d0, d1):
+        cv2.putText(d, txt, (12, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.2, col, 3)
+    both = cv2.hconcat([d0, d1])
+    cv2.imshow(WIN, cv2.resize(both, (1600, int(1600 * both.shape[0] / both.shape[1]))))
 
-    cv2.imshow(WINNAME, cv2.hconcat([disp0, disp1]))
-    key = cv2.waitKey(1) & 0xFF
-
-    if key == ord('r'):
+    k = cv2.waitKey(1) & 0xFF
+    if k == ord("r"):
         if not recording:
-            writer0 = cv2.VideoWriter(os.path.join(out_dir, "cam0.mp4"), fourcc, args.fps, (1280, 720))
-            writer1 = cv2.VideoWriter(os.path.join(out_dir, "cam1.mp4"), fourcc, args.fps, (1280, 720))
-            frame_count = 0
-            recording = True
-            print("Recording started...")
+            writer0 = cv2.VideoWriter(f"{out_dir}/cam0.mp4", fourcc, args.fps, (W, H))
+            writer1 = cv2.VideoWriter(f"{out_dir}/cam1.mp4", fourcc, args.fps, (W, H))
+            n, recording = 0, True
+            print("recording...")
         else:
             recording = False
             writer0.release(); writer1.release()
-            print(f"Saved {frame_count} frames → {out_dir}/")
-
-    elif key == ord('q'):
-        if recording:
-            writer0.release(); writer1.release()
-            print(f"Saved {frame_count} frames → {out_dir}/")
+            print(f"saved {n} frames -> {out_dir}/")
+    elif k == ord("q"):
         break
 
-stop_event.set()
+stop.set()
+if recording and writer0 is not None:
+    writer0.release(); writer1.release()
+    print(f"saved {n} frames -> {out_dir}/")
 cap0.release(); cap1.release()
 cv2.destroyAllWindows()

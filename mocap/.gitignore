@@ -1,0 +1,11 @@
+# large raw mocap data (kept locally, too big for git)
+*.c3d
+*.HEIC
+*.mp4
+*.tak
+data/take_gabin_*.csv
+~$*
+# python
+__pycache__/
+*.pyc
+.DS_Store
