@@ -945,22 +945,32 @@ def track_hand_independent(frames, seed, seed_idx, dt, max_speed=3.0,
                 used.add(match[i])
         prev_palm = np.array([out[t, s] if obs[t, s] else (seed_palm @ R.T + tt)[i]
                               for i, s in enumerate(palm_slots)])
-        # per-finger chain search from the locked MCP
+        # per-finger chain search from the locked MCP, resolved by confidence
+        # (best-fitting finger claims its markers first → fewer cross-finger
+        # thefts than a fixed thumb→pinky order)
+        order = []
         for f in hk.FINGERS:
-            L = hk.LM[f]
-            mcp = out[t, L["mcp"]]
+            mcp = out[t, hk.LM[f]["mcp"]]
             if not np.all(np.isfinite(mcp)):
                 continue
             reach = 1.4 * sum(fbones[f])
-            ci = [j for j in range(len(pts)) if j not in used
-                  and np.linalg.norm(pts[j] - mcp) < reach]
+            ci = [j for j in range(len(pts)) if np.linalg.norm(pts[j] - mcp) < reach]
             if len(ci) < 3:
                 continue
-            cand = pts[ci]
-            tri, cost = _best_chain(mcp, cand, fbones[f])
+            tri, cost = _best_chain(mcp, pts[ci], fbones[f])
+            if tri is not None:
+                order.append((cost, f, ci))
+        for _, f, _ci in sorted(order):
+            L = hk.LM[f]
+            mcp = out[t, L["mcp"]]
+            ci = [j for j in range(len(pts)) if j not in used
+                  and np.linalg.norm(pts[j] - mcp) < 1.4 * sum(fbones[f])]
+            if len(ci) < 3:
+                continue
+            tri, cost = _best_chain(mcp, pts[ci], fbones[f])
             if tri is not None:
                 for slot_key, a in zip(("pip", "dip", "tip"), tri):
-                    out[t, L[slot_key]] = cand[a]
+                    out[t, L[slot_key]] = pts[ci[a]]
                     obs[t, L[slot_key]] = True
                     used.add(ci[a])
     return out, obs
