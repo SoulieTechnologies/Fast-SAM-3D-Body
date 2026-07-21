@@ -38,8 +38,10 @@ def load(path, fps_override, seed_path=""):
         else:
             seed = z["seeds"][0] if "seeds" in z else z["seed"]
             fidx = int(z["frames"][0]) if "seeds" in z else int(z["frame"])
-            seq = io.track_hand_rigid(frames, seed, fidx, dt=1.0 / fps)
-            tag = f"seed @{fidx}"
+            seq, _obs = io.track_hand_independent(frames, seed, fidx,
+                                                  dt=1.0 / fps)
+            seq = io.reject_position_spikes(seq, win=15, thr=0.03)
+            tag = f"seed @{fidx} (per-frame independent)"
         occ = io.occupancy(seq)
         print(f"tracked {len(seq)} frames ({tag}); "
               f"per-slot occupancy min {occ.min():.2f} mean {occ.mean():.2f}")
@@ -106,8 +108,14 @@ def main():
         return
 
     fps, seq = load(args.path, args.fps, args.seed)
+    bone_ref = None
+    if args.seed:                                  # use the KNOWN seed bone lengths
+        z = np.load(args.seed)
+        sd = z["seeds"][0] if "seeds" in z else z["seed"]
+        bone_ref = {f: ha.bone_length_series(sd[None], f)[0] for f in ha.FINGERS}
     time, angles, quality = ha.hand_angle_series(seq, fps, hand=args.hand,
-                                                 clean=not args.no_clean)
+                                                 clean=not args.no_clean,
+                                                 bone_ref=bone_ref)
 
     print("per-articulation quality (valid %, longest gap ms):")
     for name in ha.angle_names():

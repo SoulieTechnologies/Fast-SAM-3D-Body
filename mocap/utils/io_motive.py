@@ -382,6 +382,45 @@ def smooth_series(series, win=5):
     return out
 
 
+def reject_position_spikes(seq, win=15, thr=0.03):
+    """NaN a marker's position when it jumps more than `thr` metres from its
+    local median position (window `win`). A wrong chain assignment teleports a
+    marker (right bone length, wrong place) — undetectable by bone length but
+    obvious as a position spike. Returns a cleaned copy of seq (T,k,3)."""
+    out = np.array(seq, dtype=float)
+    T, k = out.shape[:2]
+    h = win // 2
+    for s in range(k):
+        col = out[:, s, :]
+        for t in range(T):
+            if not np.isfinite(col[t, 0]):
+                continue
+            w = col[max(0, t - h):min(T, t + h + 1)]
+            w = w[np.isfinite(w[:, 0])]
+            if len(w) >= 4:
+                med = np.median(w, axis=0)
+                if np.linalg.norm(col[t] - med) > thr:
+                    out[t, s] = np.nan
+    return out
+
+
+def reject_spikes(series, win=11, thr=25.0):
+    """NaN points that deviate more than `thr` from the local rolling median
+    (window `win`). For slow motions this removes mislabel spikes while keeping
+    genuine (smooth) movement. Operates on a 1-D angle series."""
+    s = np.asarray(series, dtype=float)
+    out = s.copy()
+    h = win // 2
+    for t in range(len(s)):
+        if not np.isfinite(s[t]):
+            continue
+        w = s[max(0, t - h):min(len(s), t + h + 1)]
+        w = w[np.isfinite(w)]
+        if w.size >= 3 and abs(s[t] - np.median(w)) > thr:
+            out[t] = np.nan
+    return out
+
+
 def gap_report(series):
     """(#missing frames, longest gap length) for a 1-D series."""
     miss = ~np.isfinite(np.asarray(series, dtype=float))
@@ -830,6 +869,100 @@ def track_hand_palm(frames, seed, seed_idx, dt, max_speed=3.0,
         _track_dir_palm(frames, out, obs, seed_idx, sdir, np.array(seed, float),
                         np.array(seed, float), cons, palm_slots, dt, max_speed,
                         reacquire_mult, n_iter, stop)
+    return out, obs
+
+
+def _best_chain(mcp, cand, bones, tol=0.30, min_tol=0.008):
+    """Given the MCP position and candidate detection positions `cand` (C,3),
+    find the ordered (PIP,DIP,tip) indices whose bones best match `bones`
+    (L_mcp-pip, L_pip-dip, L_dip-tip). Returns (idx_triple or None, cost). This
+    is the per-finger 'try combinations, keep the best skeleton fit'."""
+    C = len(cand)
+    tols = [max(min_tol, tol * b) for b in bones]
+    best, bcost = None, 1e9
+    for a in range(C):
+        e1 = abs(np.linalg.norm(cand[a] - mcp) - bones[0])
+        if e1 > tols[0]:
+            continue
+        for b in range(C):
+            if b == a:
+                continue
+            e2 = abs(np.linalg.norm(cand[b] - cand[a]) - bones[1])
+            if e2 > tols[1]:
+                continue
+            for c in range(C):
+                if c in (a, b):
+                    continue
+                e3 = abs(np.linalg.norm(cand[c] - cand[b]) - bones[2])
+                if e3 > tols[2]:
+                    continue
+                cost = e1 + e2 + e3
+                if cost < bcost:
+                    bcost, best = cost, (a, b, c)
+    return best, bcost
+
+
+def track_hand_independent(frames, seed, seed_idx, dt, max_speed=3.0,
+                           reacquire_mult=12):
+    """Per-frame INDEPENDENT labelling (no temporal drift): each frame register
+    the distinctive palm anchor (wrist+thumb+MCPs, RANSAC, warm-started but
+    verified) to lock the 5 MCPs, then a per-finger chain search assigns
+    PIP/DIP/tip. A frame whose palm doesn't register cleanly is left NaN rather
+    than propagating a wrong label. Returns (seq, observed)."""
+    from utils import hand_kinematics as hk
+    T, k = len(frames), len(seed)
+    out = np.full((T, k, 3), np.nan)
+    obs = np.zeros((T, k), dtype=bool)
+    palm_slots = [hk.WRIST, hk.LM["thumb"]["mcp"]] + [
+        hk.LM[f]["mcp"] for f in ("index", "middle", "ring", "pinky")]
+    seed_palm = seed[palm_slots]
+    # per-finger seed bones (mcp->pip->dip->tip)
+    fbones = {}
+    for f in hk.FINGERS:
+        L = hk.LM[f]
+        ch = [L["mcp"], L["pip"], L["dip"], L["tip"]]
+        fbones[f] = [float(np.linalg.norm(seed[a] - seed[b]))
+                     for a, b in zip(ch[:-1], ch[1:])]
+    gate = max_speed * dt
+    rng = np.random.default_rng(0)
+    prev_palm = seed_palm.copy()
+    for t in range(T):
+        pts = frames[t]
+        if len(pts) < 5:
+            continue
+        fit = _fit_palm(pts, seed_palm, prev_palm, gate * reacquire_mult, rng=rng)
+        if fit is None:
+            prev_palm = seed_palm.copy()          # reset warm start on failure
+            continue
+        R, tt, match = fit
+        if sum(x >= 0 for x in match) < 5:
+            continue
+        used = set()
+        for i, slot in enumerate(palm_slots):
+            if match[i] >= 0:
+                out[t, slot] = pts[match[i]]
+                obs[t, slot] = True
+                used.add(match[i])
+        prev_palm = np.array([out[t, s] if obs[t, s] else (seed_palm @ R.T + tt)[i]
+                              for i, s in enumerate(palm_slots)])
+        # per-finger chain search from the locked MCP
+        for f in hk.FINGERS:
+            L = hk.LM[f]
+            mcp = out[t, L["mcp"]]
+            if not np.all(np.isfinite(mcp)):
+                continue
+            reach = 1.4 * sum(fbones[f])
+            ci = [j for j in range(len(pts)) if j not in used
+                  and np.linalg.norm(pts[j] - mcp) < reach]
+            if len(ci) < 3:
+                continue
+            cand = pts[ci]
+            tri, cost = _best_chain(mcp, cand, fbones[f])
+            if tri is not None:
+                for slot_key, a in zip(("pip", "dip", "tip"), tri):
+                    out[t, L[slot_key]] = cand[a]
+                    obs[t, L[slot_key]] = True
+                    used.add(ci[a])
     return out, obs
 
 

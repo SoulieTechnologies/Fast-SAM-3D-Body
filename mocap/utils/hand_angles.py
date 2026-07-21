@@ -25,7 +25,7 @@ FINGERS = hk.FINGERS
 JOINTS = ("mcp_flex", "mcp_abd", "pip", "dip")
 
 # conservative anatomical ceilings (deg); |value| above → tracking error
-ANAT_MAX = {"mcp_flex": 100.0, "mcp_abd": 45.0, "pip": 120.0, "dip": 95.0}
+ANAT_MAX = {"mcp_flex": 95.0, "mcp_abd": 30.0, "pip": 115.0, "dip": 90.0}
 # which two chain bones (0 wrist-MCP,1 MCP-PIP,2 PIP-DIP,3 DIP-tip) gate a joint
 JOINT_BONES = {"mcp_flex": (0, 1), "mcp_abd": (0, 1), "pip": (1, 2), "dip": (2, 3)}
 
@@ -39,7 +39,7 @@ def bone_length_series(seq, finger):
 
 
 def hand_angle_series(seq, fps, hand="right", bone_tol=0.30, gap_ms=120.0,
-                      smooth_win=5, clean=True):
+                      smooth_win=5, clean=True, bone_ref=None):
     """seq (T,21,3) → (time (T,), angles dict {name:(T,) deg}, quality dict).
     `angles` keys are '<finger>_<joint>'. `quality` gives per-angle
     (valid_fraction, longest_gap_ms)."""
@@ -68,8 +68,11 @@ def hand_angle_series(seq, fps, hand="right", bone_tol=0.30, gap_ms=120.0,
     gap = int(gap_ms / 1000.0 * fps)
     for f in FINGERS:
         blen = bone_length_series(seq, f)
-        bmed = np.nanmedian(blen, axis=0)
-        good_bone = np.abs(blen - bmed) <= bone_tol * bmed
+        # reference bone lengths: the KNOWN seed lengths when given (rejects a
+        # mislabelled marker whose bone deviates from the true length), else the
+        # take median
+        bref = np.asarray(bone_ref[f]) if bone_ref else np.nanmedian(blen, axis=0)
+        good_bone = np.abs(blen - bref) <= bone_tol * bref
         for j in JOINTS:
             a = per[f][j].copy()
             if clean:
@@ -78,6 +81,7 @@ def hand_angle_series(seq, fps, hand="right", bone_tol=0.30, gap_ms=120.0,
                 lim = ANAT_MAX[j]
                 bad |= ~(np.abs(a) <= lim)
                 a[bad] = np.nan
+                a = io.reject_spikes(a, win=11, thr=25.0)
                 a = io.smooth_series(a, win=smooth_win)
                 a = io.fill_short_gaps(a, max_gap=gap)
             name = f"{f}_{j}"
