@@ -3,10 +3,10 @@
 Convert MoGe2 DINOv2 Encoder to TensorRT.
 
 Usage:
-    python convert_moge_encoder_trt.py --export_onnx
-    python convert_moge_encoder_trt.py --convert_trt
-    python convert_moge_encoder_trt.py --benchmark
-    python convert_moge_encoder_trt.py --all
+    python scripts/trt/convert_moge_encoder_trt.py --export_onnx
+    python scripts/trt/convert_moge_encoder_trt.py --convert_trt
+    python scripts/trt/convert_moge_encoder_trt.py --benchmark
+    python scripts/trt/convert_moge_encoder_trt.py --all
 
 The MoGe2 encoder (DINOv2 ViT-S) accepts:
     Input: [B, 3, 512, 512] RGB image (normalized, FP16)
@@ -23,8 +23,13 @@ import time
 import torch
 import torch.nn as nn
 
+# This script lives in scripts/trt/; the repo root (checkpoints/ and any
+# repo-local packages) is two directories up.
+repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, repo_root)
+
 # Default paths
-TRT_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints", "moge_trt")
+TRT_OUTPUT_DIR = os.path.join(repo_root, "checkpoints", "moge_trt")
 ONNX_PATH = os.path.join(TRT_OUTPUT_DIR, "moge_dinov2_encoder.onnx")
 TRT_PATH = os.path.join(TRT_OUTPUT_DIR, "moge_dinov2_encoder_fp16.engine")
 

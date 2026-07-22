@@ -31,7 +31,7 @@ git clone https://github.com/SoulieTechnologies/comfi-examples-hands.git
 
 ```bash
 cd ~/code/Fast-SAM-3D-Body
-bash setup_env.sh                           # creates the env, installs torch cu124,
+bash scripts/setup_env.sh                           # creates the env, installs torch cu124,
                                             # detectron2, ultralytics, MoGe, TensorRT... (~20 min)
 conda activate fast_sam_3d_body
 pip install "rerun-sdk>=0.28"
@@ -75,8 +75,8 @@ USE_TRT_BACKBONE=0 python rerun_demo.py --source 0 --gpu 0 \
 ```bash
 conda activate fast_sam_3d_body
 cd ~/code/Fast-SAM-3D-Body
-python convert_backbone_tensorrt.py --all        # DINOv3 backbone → FP16 engine
-python convert_yolo_pose_trt.py --model checkpoints/yolo/yolo11m-pose.pt --imgsz 640 --half
+python scripts/trt/convert_backbone_tensorrt.py --all        # DINOv3 backbone → FP16 engine
+python scripts/trt/convert_yolo_pose_trt.py --model checkpoints/yolo/yolo11m-pose.pt --imgsz 640 --half
 # engines land in checkpoints/sam-3d-body-dinov3/backbone_trt/ and checkpoints/yolo/
 ```
 
@@ -130,7 +130,7 @@ cd ~/code/Fast-SAM-3D-Body
 SAM3D_ENV=fast_sam_3d_body ACADOS_ENV=acados \
 COMFI_DIR=~/code/comfi-examples-hands \
 SOURCE=0 GPU=0 FX=900 \
-bash run_rerun_demo.sh
+bash scripts/run_rerun_demo.sh
 ```
 - `FX` = camera focal in px (0 → MoGe2 auto-estimates once). `--fx` wrong ⇒ possible NaNs.
 - `SOURCE=path/to/video.mp4` to demo on a file. `RERUN_MODE=native` on a machine with a screen.

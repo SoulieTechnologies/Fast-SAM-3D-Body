@@ -151,7 +151,7 @@ def load_moge(device, path="", half=True, use_trt=False):
             print("  [FOV_TRT] Falling back to PyTorch encoder")
     elif use_trt:
         print(f"  [FOV_TRT] TensorRT engine not found: {TRT_ENCODER_PATH}")
-        print("  [FOV_TRT] Run: python convert_moge_encoder_trt.py --all")
+        print("  [FOV_TRT] Run: python scripts/trt/convert_moge_encoder_trt.py --all")
 
     return moge_model
 

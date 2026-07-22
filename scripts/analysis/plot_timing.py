@@ -2,8 +2,8 @@
 """Analyze cosmik_hand_demo timing.log files: stats table + graphs.
 
 Usage:
-    python plot_timing.py output_cosmik_demo/<run>/timing.log
-    python plot_timing.py run512/timing.log run256/timing.log   # compare runs
+    python scripts/analysis/plot_timing.py output_cosmik_demo/<run>/timing.log
+    python scripts/analysis/plot_timing.py run512/timing.log run256/timing.log   # compare runs
 
 Prints a per-column stats table (mean/median/p95) for each log and saves
 <log_dir>/timing.png with the time series (body/hand latency breakdown,

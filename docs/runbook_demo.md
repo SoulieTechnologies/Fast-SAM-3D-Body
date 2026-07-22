@@ -16,7 +16,7 @@ Run everything (both processes, Ctrl+C stops both):
 ```bash
 cd <this-repo>
 SAM3D_ENV=<sam3d-env> ACADOS_ENV=<acados-env> COMFI_DIR=~/code/comfi-examples_new \
-SOURCE=0 GPU=0 FX=900 bash run_rerun_demo.sh
+SOURCE=0 GPU=0 FX=900 bash scripts/run_rerun_demo.sh
 ```
 Then open (add `ssh -L <port>:localhost:<port>` for each if remote):
 - **Rerun UI**: http://localhost:9090

@@ -2,9 +2,9 @@
 # Launch the full live demo: SAM3D extractor (Rerun UI + recording) + ACADOS IK
 # retargeting (meshcat + Rerun mirror). Ctrl+C stops both.
 #
-#   bash run_rerun_demo.sh                        # webcam 0
-#   SOURCE=path/to/video.mp4 bash run_rerun_demo.sh
-#   GPU=7 FX=900 bash run_rerun_demo.sh
+#   bash scripts/run_rerun_demo.sh                        # webcam 0
+#   SOURCE=path/to/video.mp4 bash scripts/run_rerun_demo.sh
+#   GPU=7 FX=900 bash scripts/run_rerun_demo.sh
 #
 # Then open (over ssh -L if remote):
 #   Rerun UI : http://localhost:9090   (camera + 3D skeleton + retarget + latency)
@@ -18,7 +18,7 @@ COMFI_DIR="${COMFI_DIR:-$HOME/code/comfi-examples_new}"
 SOURCE="${SOURCE:-0}"                            # webcam index or video path
 GPU="${GPU:-0}"
 FX="${FX:-0}"                                    # camera focal (0 = MoGe2 auto)
-REPO_DIR_EARLY="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR_EARLY="$(cd "$(dirname "$0")/.." && pwd)"
 CKPT_DIR="${CKPT_DIR:-$REPO_DIR_EARLY/checkpoints/sam-3d-body-dinov3}"
 USE_TRT="${USE_TRT:-1}"                          # 0 = no TensorRT engine (slow, first test)
 INFER="${INFER:-body}"                           # body: fast/coarse fingers | full: SAM hand decoder (faithful fingers, slower)
@@ -32,7 +32,7 @@ IK_N="${IK_N:-10}"
 EXTRA_A="${EXTRA_A:-}"                           # extra flags for rerun_demo.py
 EXTRA_B="${EXTRA_B:-}"                           # extra flags for run_ik_live_rerun.py
 
-REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="$REPO_DIR/output_rerun_demo"
 mkdir -p "$LOG_DIR"
 

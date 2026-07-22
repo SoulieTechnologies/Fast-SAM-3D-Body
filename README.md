@@ -1,12 +1,120 @@
-# Fast SAM 3D Body
+# Fast SAM 3D Body — CLeAR Lab fork
+
+Multi-camera **metric 3D body + hand** tracking from RGB, with offline replay and
+**mocap validation** for a wearable-free dexterous-teleoperation study
+(CLeAR Lab, NUS). Built on top of *Fast SAM 3D Body* (USC PSI Lab — upstream
+paper and attribution [below](#upstream-fast-sam-3d-body)).
+
+The pipeline: calibrate N cameras → record synchronized video → run the NLF body
+backbone + SAM hand decoder → triangulate metric 3D keypoints → compare the hand
+joint **angles** against optical mocap (ground truth), and/or stream them to a
+robot hand for teleoperation.
+
+---
+
+## Repository layout
+
+```
+fastsam3d/
+├── cosmik_hand_demo.py        # ★ main entry: N-cam metric body + hand tracking
+│                              #   (live cameras OR offline --replay of a recording)
+├── stream_demo.py             # TCP keypoint emitter + TRT/speed env flags (imported first)
+├── rerun_demo.py              # Rerun UI demo (body skeleton + hand overlay + 3D)
+├── run_ik_live_rerun.py       # live IK/retargeting feed for the Rerun demo
+├── body_hand_decoder_extractor.py, visualize_skeleton_video.py, hand_view_select.py
+│                              # libraries used by the entries above (keep beside them)
+├── extract_two_cameras.py, extract_dualgpu.py
+│                              # offline stereo hand extraction (older path)
+│
+├── stereo_calibration/        # N-camera calibration + synchronized recording
+│   ├── capture_calibration_multi.py / calibrate_multi.py   # ChArUco → multi_params.npz
+│   ├── multi_to_stereo.py     # export a rectified 2-cam stereo_params.npz from it
+│   ├── record_multi.py        # ★ record N synchronized cameras (record now, infer later)
+│   └── record_stereo.py, calibrate_stereo.py, triangulate.py, verify_calibration.py
+│
+├── mocap/                     # ★ hand mocap ↔ fastsam3d angle comparison (own README)
+│   ├── core/  realtime/  utils/  scripts/
+│   └── soma_hands/            # SOMA auto-labelling of raw mocap takes
+│
+├── orca_teleop/              # SAM3D hand → ACADOS MPC → Orca / Sharpa robot hand (own README)
+│
+├── sam_3d_body/              # the SAM-3D-Body model package (upstream)
+├── mhr2smpl/                 # MHR→SMPL neural mapping
+├── tools/                    # model builders (SAM / detector / FOV) + unit tests
+│
+├── scripts/                  # entry-point scripts (not imported anywhere)
+│   ├── trt/                  # TensorRT engine builders (run on the GPU machine)
+│   ├── analysis/             # plot_timing.py, plot_view_selection.py (read run outputs)
+│   ├── setup_env.sh, run_rerun_demo.sh, demo_extract.sh
+│
+├── docs/                     # setup + demo guides
+├── checkpoints/  assets/  data/  notebook/     # weights, media, sample data (git-ignored)
+└── README.md
+```
+
+## What runs what
+
+| Task | Command | Details |
+|---|---|---|
+| Set up the env | `bash scripts/setup_env.sh` → `conda activate fast_sam_3d_body` | — |
+| Calibrate 4 cameras | `stereo_calibration/capture_calibration_multi.py` → `calibrate_multi.py --cams 0,1,2,3` | → `multi_params.npz` |
+| Record synchronized video | `stereo_calibration/record_multi.py --cams 0,1,2,3 --name take01 --rotate180` | record now, infer later |
+| **Live** body + hand tracking | `cosmik_hand_demo.py --cams 0,1,2,3 --calib multi_params.npz --cap-width 1920 --cap-height 1080` | metric 3D, Rerun UI |
+| **Offline** inference on a recording | `cosmik_hand_demo.py … --replay recordings/take01` | same math, every frame, no drop |
+| 2-cam rectified stereo (for `extract_*`) | `stereo_calibration/multi_to_stereo.py --pair 0,1` | → `stereo_params.npz` |
+| Mocap vs fastsam3d angles | see [`mocap/README.md`](mocap/README.md) | the paper's accuracy result |
+| Robot-hand teleop | see [`orca_teleop/`](orca_teleop/) | ACADOS MPC retargeting |
+| Build TensorRT engines | `bash scripts/trt/build_tensorrt.sh` | GPU machine only |
+| Plot run timings / view usage | `scripts/analysis/plot_timing.py <run>/timing.log` | offline analysis |
+
+More detail: [`docs/hand_pipeline.md`](docs/hand_pipeline.md),
+[`docs/runbook_demo.md`](docs/runbook_demo.md),
+[`docs/setup_new_machine.md`](docs/setup_new_machine.md).
+
+> **Note on layout.** The live-tracking entry points (`cosmik_hand_demo.py`,
+> `stream_demo.py`, `rerun_demo.py`, …) stay at the repository root: they import
+> one another by bare module name and add the repo root to `sys.path` so the
+> `sam_3d_body` / `stereo_calibration` packages resolve. `stream_demo` also sets
+> the TensorRT/speed environment flags at import time, before `torch` — so it
+> must be imported first. Keep these files together at the root.
+
+## Checkpoints
+
+```
+checkpoints/
+├── sam-3d-body-dinov3/       # auto-downloaded from HuggingFace on first run
+│   ├── model.ckpt
+│   └── assets/mhr_model.pt
+├── yolo/                     # place YOLO-Pose weights here
+│   ├── yolo11m-pose.pt
+│   └── yolo11m-pose.engine   # generated by scripts/trt/convert_yolo_pose_trt.py (optional)
+└── moge_trt/                 # generated by scripts/trt/build_tensorrt.sh (optional)
+    └── moge_dinov2_encoder_fp16.engine
+```
+
+## TensorRT acceleration (optional)
+
+```bash
+# all engines (YOLO-Pose + MoGe encoder + DINOv3 backbone)
+bash scripts/trt/build_tensorrt.sh
+
+# or individually
+python scripts/trt/convert_yolo_pose_trt.py --model checkpoints/yolo/yolo11m-pose.pt --imgsz 640 --half
+python scripts/trt/convert_moge_encoder_trt.py --all
+python scripts/trt/convert_backbone_tensorrt.py --all
+```
+
+All generated engines are stored under `./checkpoints/`.
+
+---
+
+# Upstream: Fast SAM 3D Body
 
 ### Accelerating SAM 3D Body for Real-Time Full-Body Human Mesh Recovery
 
 [Timing Yang](http://yangtiming.github.io)<sup>1</sup>, [Sicheng He](https://hesicheng.net)<sup>1</sup>, [Hongyi Jing](https://hongyijing.me)<sup>1</sup>, [Jiawei Yang](https://jiawei-yang.github.io)<sup>1</sup>, [Zhijian Liu](https://zhijianliu.com)<sup>2,3</sup>, [Chuhang Zou](https://zouchuhang.github.io)<sup>4</sup><sup>†</sup>, [Yue Wang](https://yuewang.xyz)<sup>1,3</sup><sup>†</sup>
 
-<sup>1</sup>USC Physical Superintelligence (PSI) Lab &nbsp; <sup>2</sup>University of California, San Diego &nbsp; <sup>3</sup>NVIDIA &nbsp; <sup>4</sup>Meta Reality Labs
-
-<sup>†</sup> Joint corresponding authors
+<sup>1</sup>USC Physical Superintelligence (PSI) Lab &nbsp; <sup>2</sup>University of California, San Diego &nbsp; <sup>3</sup>NVIDIA &nbsp; <sup>4</sup>Meta Reality Labs &nbsp; <sup>†</sup> Joint corresponding authors
 
 <p align="center">
   <a href="https://arxiv.org/abs/2603.15603">
@@ -22,7 +130,7 @@
   <img src="assets/teaser.png" width="900">
 </p>
 
-> **Speed-accuracy overview of Fast SAM 3D Body.** Top left: Qualitative results on in-the-wild images show our framework preserves high-fidelity reconstruction. Top right: Our method achieves up to a **10.25x** end-to-end speedup over SAM 3D Body and replaces the iterative MHR-to-SMPL bottleneck with a **10,000x** faster neural mapping. Bottom: Our system enables real-time humanoid robot control from a single RGB stream at **~65 ms** per frame on an NVIDIA RTX 5090.
+> **Speed-accuracy overview of Fast SAM 3D Body.** Top left: qualitative results on in-the-wild images show the framework preserves high-fidelity reconstruction. Top right: up to a **10.25x** end-to-end speedup over SAM 3D Body, replacing the iterative MHR-to-SMPL bottleneck with a **10,000x** faster neural mapping. Bottom: real-time humanoid robot control from a single RGB stream at **~65 ms** per frame on an NVIDIA RTX 5090.
 
 ## Abstract
 
@@ -33,85 +141,6 @@ SAM 3D Body (3DB) achieves state-of-the-art accuracy in monocular 3D human mesh 
 </p>
 
 > **Qualitative comparison.** The original SAM 3D Body (left) and our Fast variant (right) yield visually comparable mesh reconstructions across diverse poses and multi-person scenes on 3DPW and EMDB.
-
-## Getting Started
-
-### Environment
-
-Please refer to [SAM 3D Body](https://github.com/facebookresearch/sam-3d-body) for environment setup, or use our setup script:
-
-```bash
-bash setup_env.sh
-conda activate fast_sam_3d_body
-```
-
-### Checkpoints
-
-```
-checkpoints/
-├── sam-3d-body-dinov3/       # Auto-downloaded from HuggingFace on first run
-│   ├── model.ckpt
-│   └── assets/
-│       └── mhr_model.pt
-├── yolo/                     # Place YOLO-Pose weights here
-│   ├── yolo11m-pose.pt
-│   └── yolo11m-pose.engine   # Generated by convert_yolo_pose_trt.py (optional)
-└── moge_trt/                 # Generated by build_tensorrt.sh (optional)
-    └── moge_dinov2_encoder_fp16.engine
-```
-
-### Run
-
-```bash
-# Live Rerun demo (camera + skeleton overlay + 3D + ACADOS retargeting)
-bash run_rerun_demo.sh
-```
-
-### Guides
-
-| Guide | What it covers |
-|---|---|
-| [**README_HAND_PIPELINE.md**](README_HAND_PIPELINE.md) | Real-time body + fine **hand** tracking (~14.6 FPS): YOLO body skeleton + dedicated SAM hand decoder |
-| [**RUNBOOK_DEMO.md**](RUNBOOK_DEMO.md) | Live demos: **Rerun UI** (camera + skeleton overlay + 3D skeleton + ACADOS retargeting via `run_rerun_demo.sh`) and MJPEG browser streaming |
-| [**orca_teleop/**](orca_teleop/) | Hand teleop: SAM3D hand keypoints → ACADOS MPC retargeting on the Orca hand (`retarget_mpc.py` viser demo + `hand_teleop_node.py` ROS 2 node) |
-
-### TensorRT Acceleration (Optional)
-
-```bash
-# Convert all models (YOLO-Pose + MoGe encoder + DINOv3 backbone)
-bash build_tensorrt.sh
-
-# Or convert individually
-python convert_yolo_pose_trt.py --model yolo11m-pose.pt --imgsz 640 --half
-python convert_moge_encoder_trt.py --all
-python convert_backbone_tensorrt.py --all
-```
-
-All generated engines are stored under `./checkpoints/`.
-
-## Real-World Deployment
-
-For instructions on running the publisher, see [docs/realworld_deployment.md](docs/realworld_deployment.md).
-
-We demonstrate a real-time, vision-only teleoperation system for the Unitree G1 humanoid robot using a single RGB camera, operating at ~65 ms end-to-end latency on an NVIDIA RTX 5090.
-
-<p align="center">
-  <img src="assets/teleop_qual.png" width="900">
-</p>
-
-> **Humanoid teleoperation.** The system tracks diverse whole-body motions including upper-body gestures (a), body rotations (b-e), walking (f), wide stance (g), single-leg standing (h), squatting (i), and kneeling (j).
-
-<p align="center">
-  <img src="assets/teleop_policy.png" width="900">
-</p>
-
-> **Humanoid policy rollout.** The robot grasps a box on the table with both hands, squats down, and steps to the right. Achieving 80% task success rate with 40 demonstrations collected via our system.
-
-<p align="center">
-  <img src="assets/supp_multiview_v1.png" width="900">
-</p>
-
-> **Single-View vs Multi-View.** Multi-view fusion resolves depth ambiguities inherent in single-view reconstruction, producing more accurate SMPL body estimates.
 
 ## Citation
 
@@ -126,4 +155,4 @@ We demonstrate a real-time, vision-only teleoperation system for the Unitree G1 
 
 ## Acknowledgements
 
-This project builds upon [SAM 3D Body](https://github.com/facebookresearch/sam-3d-body) (3DB) and [Multi-HMR (MHR)](https://github.com/facebookresearch/MHR). We thank the original authors for releasing their models and codebases, which served as the foundation for our acceleration framework.
+This project builds upon [SAM 3D Body](https://github.com/facebookresearch/sam-3d-body) (3DB) and [Multi-HMR (MHR)](https://github.com/facebookresearch/MHR). We thank the original authors for releasing their models and codebases, which served as the foundation for this acceleration framework.

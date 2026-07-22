@@ -38,15 +38,15 @@ The backbone is already TRT-FP16 + batched over the 2 hands; the decoder is the 
 
 ```bash
 # 1. Environment (see setup_env.sh for the full SAM-3D-Body install)
-bash setup_env.sh
+bash scripts/setup_env.sh
 
 # 2. Download the SAM-3D-Body checkpoint into ./checkpoints/sam-3d-body-dinov3/
 #    (model.ckpt + assets/mhr_model.pt) — see the main README / HuggingFace.
 
 # 3. Build the TensorRT engines (once, ~15 min each):
-python convert_backbone_tensorrt.py            # 512² backbone (body-only / full modes)
-python build_backbone_256.py                   # 256² backbone (this hand pipeline)
-python convert_yolo_pose_trt.py --model yolo11m-pose.pt --imgsz 640 --half
+python scripts/trt/convert_backbone_tensorrt.py            # 512² backbone (body-only / full modes)
+python scripts/trt/build_backbone_256.py                   # 256² backbone (this hand pipeline)
+python scripts/trt/convert_yolo_pose_trt.py --model yolo11m-pose.pt --imgsz 640 --half
 ```
 
 Engines land in `checkpoints/sam-3d-body-dinov3/backbone_trt/`.

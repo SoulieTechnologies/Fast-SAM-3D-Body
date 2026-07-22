@@ -3,15 +3,17 @@
 Convert YOLO-Pose model to TensorRT format.
 
 Usage:
-    python convert_yolo_pose_trt.py --model yolo11m-pose.pt --imgsz 640
-    python convert_yolo_pose_trt.py --model yolo11n-pose.pt --imgsz 640 --half
+    python scripts/trt/convert_yolo_pose_trt.py --model yolo11m-pose.pt --imgsz 640
+    python scripts/trt/convert_yolo_pose_trt.py --model yolo11n-pose.pt --imgsz 640 --half
 """
 
 import argparse
 import os
 
 
-CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints", "yolo")
+# This script lives in scripts/trt/; checkpoints/ is at the repo root, two up.
+_repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+CHECKPOINT_DIR = os.path.join(_repo_root, "checkpoints", "yolo")
 
 
 def convert_to_tensorrt(model_name: str, imgsz: int = 640, half: bool = True):

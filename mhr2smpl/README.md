@@ -94,7 +94,7 @@ Uses the same `fast_sam_3d_body` environment as the main project. See the [root 
 
 ```bash
 # From the project root
-bash setup_env.sh
+bash scripts/setup_env.sh
 conda activate fast_sam_3d_body
 ```
 

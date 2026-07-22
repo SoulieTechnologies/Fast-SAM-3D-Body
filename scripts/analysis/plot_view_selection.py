@@ -2,7 +2,7 @@
 """Which cameras decoded each hand over a cosmik_hand_demo recording.
 
 Usage:
-    python plot_view_selection.py output_cosmik_demo/<run>/
+    python scripts/analysis/plot_view_selection.py output_cosmik_demo/<run>/
 
 Reads hands_2d_views.npy (T, ncam, 42, 2): a (view, hand) block is finite
 only when the decoder actually ran there — with --hand-topk that is exactly

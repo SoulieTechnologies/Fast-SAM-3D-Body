@@ -6,7 +6,7 @@ keypoints vs 512² (measured) while running the backbone AND decoder much faster
 (16x16 tokens instead of 32x32). Reuses convert_backbone_tensorrt.py, overriding
 the size constants.
 
-Run:  CUDA_VISIBLE_DEVICES=7 python build_backbone_256.py
+Run:  CUDA_VISIBLE_DEVICES=7 python scripts/trt/build_backbone_256.py
 Output: checkpoints/sam-3d-body-dinov3/backbone_trt/backbone_dinov3_fp16_256.engine
 """
 import os

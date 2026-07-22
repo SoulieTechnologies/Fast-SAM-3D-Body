@@ -3,10 +3,10 @@
 Convert DINOv3 Backbone to TensorRT.
 
 Usage:
-    python convert_backbone_tensorrt.py --export_onnx
-    python convert_backbone_tensorrt.py --convert_trt
-    python convert_backbone_tensorrt.py --benchmark
-    python convert_backbone_tensorrt.py --all
+    python scripts/trt/convert_backbone_tensorrt.py --export_onnx
+    python scripts/trt/convert_backbone_tensorrt.py --convert_trt
+    python scripts/trt/convert_backbone_tensorrt.py --benchmark
+    python scripts/trt/convert_backbone_tensorrt.py --all
 
 The backbone accepts:
     Input: [B, 3, 512, 512] RGB image (normalized)
@@ -18,12 +18,12 @@ The backbone accepts:
 Step 1: Export and convert to TensorRT
 
 # All-in-one: export ONNX + convert TensorRT + benchmark
-python convert_backbone_tensorrt.py --all
+python scripts/trt/convert_backbone_tensorrt.py --all
 
 # Or run steps individually:
-python convert_backbone_tensorrt.py --export_onnx    # Export ONNX
-python convert_backbone_tensorrt.py --convert_trt    # Convert to TensorRT
-python convert_backbone_tensorrt.py --benchmark      # Performance comparison
+python scripts/trt/convert_backbone_tensorrt.py --export_onnx    # Export ONNX
+python scripts/trt/convert_backbone_tensorrt.py --convert_trt    # Convert to TensorRT
+python scripts/trt/convert_backbone_tensorrt.py --benchmark      # Performance comparison
 
 Step 2: Run inference with TensorRT
 
@@ -44,17 +44,18 @@ import time
 import torch
 import torch.nn as nn
 
-# Add parent directory to path
-parent_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, parent_dir)
+# This script lives in scripts/trt/; the repo root (which holds the sam_3d_body
+# package and checkpoints/) is two directories up.
+repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, repo_root)
 
 
 # Default paths — env var CHECKPOINT_DIR wins, then the repo-local checkpoints/,
 # then the legacy layout with checkpoints/ as a sibling of the repo.
 _candidates = [
     os.environ.get("CHECKPOINT_DIR", ""),
-    os.path.join(parent_dir, "checkpoints", "sam-3d-body-dinov3"),
-    os.path.join(os.path.dirname(parent_dir), "checkpoints", "sam-3d-body-dinov3"),
+    os.path.join(repo_root, "checkpoints", "sam-3d-body-dinov3"),
+    os.path.join(os.path.dirname(repo_root), "checkpoints", "sam-3d-body-dinov3"),
 ]
 CHECKPOINT_DIR = next((c for c in _candidates if c and os.path.isdir(c)), _candidates[1])
 TRT_OUTPUT_DIR = os.path.join(CHECKPOINT_DIR, "backbone_trt")
