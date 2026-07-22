@@ -36,9 +36,19 @@ def main():
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--occ", type=int, default=5, help="max synthetic occlusions")
     p.add_argument("--ghost", type=int, default=3, help="max synthetic ghosts")
+    p.add_argument("--strategy", choices=["A", "C"], default="A",
+                   help="A: flat-hand (runs on stock SOMA, PLUMBING ONLY — flexed "
+                        "finger angles are unreliable). C: GRAB fingers (real "
+                        "finger angles) — REQUIRES the patch in "
+                        "patches/enable_hand_animation.md applied first.")
+    p.add_argument("--grab-dir", default=None,
+                   help="GRAB npz dir (Strategy C only); run inspect_grab.py first")
     p.add_argument("--smoke", action="store_true",
                    help="one fast_dev_run iteration to check wiring, no real train")
     args = p.parse_args()
+
+    if args.strategy == "C" and not args.grab_dir:
+        p.error("--strategy C needs --grab-dir (and the hand-animation patch applied)")
 
     from soma.train.train_soma_multiple import train_multiple_soma
 
@@ -55,9 +65,6 @@ def main():
         # we don't have the AMASS marker-noise model -> disable it:
         "data_parms.mocap_dataset.amass_marker_noise_model.enable": False,
 
-        # Strategy A: flat hands (stock SOMA cannot animate fingers):
-        "data_parms.body_dataset.animate_hand": False,
-        "data_parms.body_dataset.animate_face": False,
         # dense small markerset -> more layout variants generalise better:
         "data_parms.marker_dataset.num_marker_layout_augmentation": 8,
         "data_parms.marker_dataset.num_random_vid_ring": 3,
@@ -71,7 +78,20 @@ def main():
         "trainer.fast_dev_run": bool(args.smoke),
     }
 
-    print(f"[{'SMOKE' if args.smoke else 'TRAIN'}] expr={args.expr_id} "
+    if args.strategy == "A":
+        # PLUMBING ONLY: flat hands, GRAB unused. Flexed-finger angles unreliable.
+        soma_train_cfg["data_parms.body_dataset.animate_hand"] = False
+        soma_train_cfg["data_parms.body_dataset.animate_face"] = False
+    else:
+        # Strategy C: real GRAB finger poses (needs the hand-animation patch).
+        soma_train_cfg["data_parms.body_dataset.animate_hand"] = True
+        soma_train_cfg["data_parms.body_dataset.grab_dir"] = args.grab_dir
+        soma_train_cfg["data_parms.marker_dataset.enable_rnd_vid_on_face_hands"] = True
+        print("[Strategy C] animate_hand=True — ensure patches/"
+              "enable_hand_animation.md is APPLIED, else SOMA raises "
+              "NotImplementedError. Run inspect_grab.py first.")
+
+    print(f"[{'SMOKE' if args.smoke else 'TRAIN'}/{args.strategy}] expr={args.expr_id} "
           f"layout={args.layout} occ={args.occ} ghost={args.ghost}")
     train_multiple_soma(
         soma_data_settings=soma_data_settings,

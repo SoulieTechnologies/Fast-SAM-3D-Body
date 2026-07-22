@@ -13,17 +13,21 @@ Open-source SOMA **cannot animate fingers** during synthetic-data generation:
 sampler (`sample_hand_sequences.py`) is stubbed. This is *the* reason "SOMA is
 body-oriented". Two strategies:
 
-- **Strategy A (default, runs on stock SOMA now).** Train with `animate_hand=false`:
-  markers sit on the hand vertices of otherwise flat-hand AMASS bodies. Marker-
-  layout augmentation + AMASS noise give variation. Finger flexion at capture is
-  out-of-distribution, but the wrist→MCP frame is rigid so labels are usually
-  still separable. **Try this first — it needs no code changes.**
-- **Strategy C (quality upgrade, needs our patch).** Implement the hand sampler
-  from GRAB so `animate_hand=true` yields real finger poses. See
-  `patches/enable_hand_animation.md`. Real dev + GPU validation.
+- **Strategy A — PLUMBING CHECKPOINT ONLY (does NOT use GRAB).** Trains with
+  `animate_hand=false`: flat-hand AMASS bodies, markers on the hand vertices. The
+  model never sees flexed fingers, so **flexed-finger angles are unreliable** —
+  labels can swap on DIP/tip exactly during flexion, which is the signal we
+  measure. Use A only to prove the whole SOMA pipeline runs end-to-end
+  (install → superset → train → label → angles → compare). **Do not report A's
+  finger angles as a result.** `train_hands.py --strategy A`.
+- **Strategy C — the real finger-angle solution (uses GRAB).** Inject real GRAB
+  MANO finger poses (`animate_hand=true`) so training sees flexion. Needs the
+  patch in `patches/enable_hand_animation.md` applied, then
+  `inspect_grab.py` to confirm the GRAB npz format, then
+  `train_hands.py --strategy C --grab-dir <GRAB>`.
 
-**Decision needed from Théophile/boss:** start with A and only escalate to C if
-A's finger labels aren't good enough? (Recommended.)
+**Plan (confirmed 2026-07-22): A first for plumbing, then C for the actual
+finger angles.** GRAB matters only in C.
 
 ## Assets to obtain (licensed — need personal MPI accounts)
 
@@ -63,15 +67,23 @@ python prepare_soma_data.py --c3d ../data/take_gabin_1.c3d --c3d ../data/take_ga
     --ds-name clear_hands --subject gabin --gender male --work-dir $WORK/mocap
 #   -> note the reported units; set mocap.unit accordingly (our Motive = m).
 
-# 4. generate synthetic data + train (Strategy A). Smoke first, then the real run:
-python train_hands.py --work-base $WORK --support-base $SUPPORT \
+# 4a. STRATEGY A — plumbing checkpoint (flat hands, NOT the finger-angle result):
+python train_hands.py --strategy A --work-base $WORK --support-base $SUPPORT \
     --layout $WORK/data/clear_hands/superset.json \
     --expr-id clear_hands_A_v1 --num-gpus 1 --num-cpus 4 --smoke   # validate wiring
-python train_hands.py --work-base $WORK --support-base $SUPPORT \
+python train_hands.py --strategy A --work-base $WORK --support-base $SUPPORT \
     --layout $WORK/data/clear_hands/superset.json \
     --expr-id clear_hands_A_v1 --num-gpus 1 --num-cpus 4           # ~hours on 1 GPU
 #   --layout can instead be a LABELLED c3d frame (MoSh++ extracts the placement).
 #   The AMASS marker-noise model is disabled (we don't have it) inside the driver.
+
+# 4b. STRATEGY C — the real finger angles (GRAB). Apply the patch, check GRAB, train:
+#   (i) apply patches/enable_hand_animation.md to the soma repo
+python inspect_grab.py --grab-dir $SUPPORT/smplx/amass_neutral/GRAB   # confirm npz format
+python train_hands.py --strategy C --grab-dir $SUPPORT/smplx/amass_neutral/GRAB \
+    --work-base $WORK --support-base $SUPPORT \
+    --layout $WORK/data/clear_hands/superset.json \
+    --expr-id clear_hands_C_v1 --num-gpus 1 --num-cpus 4 --smoke   # then drop --smoke
 
 # 5. label our raw take with the trained model
 python label_hands.py --work-base $WORK --support-base $SUPPORT \
@@ -120,6 +132,7 @@ Components that don't need SMPL-X/AMASS/GPU were tested against the real takes:
 - `build_hand_superset.py` — 21 hand landmarks → SMPL-X vertex ids → layout JSON
 - `prepare_soma_data.py` — raw c3d → SOMA `ds/subject/seq.c3d` + settings.json
 - `check_assets.py` — verify SMPL-X / AMASS / GRAB / deps
+- `inspect_grab.py` — confirm the GRAB npz format for the Strategy-C sampler
 - `install_soma.sh` — conda env + psbody-mesh + moshpp + soma
 - `train_hands.py` — driver: synth data + train (wraps train_multiple_soma)
 - `label_hands.py` — driver: auto-label our c3d (wraps run_soma_on_multiple_settings)
