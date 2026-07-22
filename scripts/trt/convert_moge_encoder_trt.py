@@ -25,7 +25,9 @@ import torch.nn as nn
 
 # This script lives in scripts/trt/; the repo root (checkpoints/ and any
 # repo-local packages) is two directories up.
-repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+repo_root = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 sys.path.insert(0, repo_root)
 
 # Default paths
@@ -45,6 +47,7 @@ class MoGeEncoderWrapper(nn.Module):
     """
     Wrapper for MoGe2 DINOv2 encoder that exposes a simple forward interface.
     """
+
     def __init__(self, encoder):
         super().__init__()
         self.encoder = encoder
@@ -64,7 +67,7 @@ class MoGeEncoderWrapper(nn.Module):
             x,
             token_rows=TOKEN_ROWS,
             token_cols=TOKEN_COLS,
-            return_class_token=True
+            return_class_token=True,
         )
         return features, cls_token
 
@@ -86,7 +89,7 @@ def load_moge_encoder():
     print(f"Encoder type: {type(encoder)}")
 
     # Enable ONNX compatible mode to avoid unsupported ops (antialias interpolation)
-    if hasattr(encoder, 'backbone'):
+    if hasattr(encoder, "backbone"):
         encoder.backbone.onnx_compatible_mode = True
         print("  Enabled ONNX compatible mode on backbone")
 
@@ -109,17 +112,25 @@ def export_onnx():
 
     # Monkey-patch F.interpolate to disable antialias (not supported in ONNX)
     import torch.nn.functional as F
+
     _original_interpolate = F.interpolate
 
     def _interpolate_no_antialias(*args, **kwargs):
-        kwargs.pop('antialias', None)  # Remove antialias if present
+        kwargs.pop("antialias", None)  # Remove antialias if present
         return _original_interpolate(*args, **kwargs)
 
     F.interpolate = _interpolate_no_antialias
     print("  Patched F.interpolate to disable antialias for ONNX export")
 
     # Create dummy input
-    dummy_input = torch.randn(BATCH_SIZE, 3, IMAGE_SIZE, IMAGE_SIZE, device="cuda", dtype=torch.float16)
+    dummy_input = torch.randn(
+        BATCH_SIZE,
+        3,
+        IMAGE_SIZE,
+        IMAGE_SIZE,
+        device="cuda",
+        dtype=torch.float16,
+    )
 
     print(f"Input shape: {dummy_input.shape}")
     print(f"Input dtype: {dummy_input.dtype}")
@@ -168,7 +179,9 @@ def convert_trt():
     builder = trt.Builder(logger)
     try:
         flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    except AttributeError:      # TRT >= 11: explicit batch is the only mode (flag removed)
+    except (
+        AttributeError
+    ):  # TRT >= 11: explicit batch is the only mode (flag removed)
         flags = 0
     network = builder.create_network(flags)
     parser = trt.OnnxParser(network, logger)
@@ -217,7 +230,14 @@ def benchmark():
     wrapper.eval()
 
     # Create input
-    dummy_input = torch.randn(BATCH_SIZE, 3, IMAGE_SIZE, IMAGE_SIZE, device="cuda", dtype=torch.float16)
+    dummy_input = torch.randn(
+        BATCH_SIZE,
+        3,
+        IMAGE_SIZE,
+        IMAGE_SIZE,
+        device="cuda",
+        dtype=torch.float16,
+    )
 
     # Warmup PyTorch
     print("\nWarming up PyTorch...")
@@ -251,9 +271,14 @@ def benchmark():
     context = engine.create_execution_context()
 
     # Allocate output buffers
-    features_buf = torch.empty((BATCH_SIZE, EMBED_DIM, TOKEN_ROWS, TOKEN_COLS),
-                               device="cuda", dtype=torch.float16)
-    cls_buf = torch.empty((BATCH_SIZE, EMBED_DIM), device="cuda", dtype=torch.float16)
+    features_buf = torch.empty(
+        (BATCH_SIZE, EMBED_DIM, TOKEN_ROWS, TOKEN_COLS),
+        device="cuda",
+        dtype=torch.float16,
+    )
+    cls_buf = torch.empty(
+        (BATCH_SIZE, EMBED_DIM), device="cuda", dtype=torch.float16
+    )
 
     # Set tensor addresses
     context.set_input_shape("image", tuple(dummy_input.shape))
@@ -287,10 +312,20 @@ def benchmark():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert MoGe2 encoder to TensorRT")
-    parser.add_argument("--export_onnx", action="store_true", help="Export to ONNX")
-    parser.add_argument("--convert_trt", action="store_true", help="Convert ONNX to TensorRT")
-    parser.add_argument("--benchmark", action="store_true", help="Benchmark PyTorch vs TensorRT")
+    parser = argparse.ArgumentParser(
+        description="Convert MoGe2 encoder to TensorRT"
+    )
+    parser.add_argument(
+        "--export_onnx", action="store_true", help="Export to ONNX"
+    )
+    parser.add_argument(
+        "--convert_trt", action="store_true", help="Convert ONNX to TensorRT"
+    )
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="Benchmark PyTorch vs TensorRT",
+    )
     parser.add_argument("--all", action="store_true", help="Run all steps")
 
     args = parser.parse_args()

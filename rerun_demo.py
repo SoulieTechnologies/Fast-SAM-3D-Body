@@ -40,8 +40,14 @@ sys.path.insert(0, parent_dir)
 # provides the camera receiver, keypoint emitter, person selection and intrinsics
 # helpers — reuse them instead of duplicating.
 from stream_demo import (  # noqa: E402 — sets TRT/speed env flags at import, before torch
-    _EMIT, _RECV, _STOP,
-    _canonical_M, _emit_server, _estimate_intrinsics, _quiet, _receiver,
+    _EMIT,
+    _RECV,
+    _STOP,
+    _canonical_M,
+    _emit_server,
+    _estimate_intrinsics,
+    _quiet,
+    _receiver,
     _select_person,
 )
 
@@ -53,19 +59,47 @@ import cv2
 import numpy as np
 import torch
 from notebook.utils import setup_sam_3d_body
-from visualize_skeleton_video import ALL_BONES, draw_option_b, draw_skeleton
+from utils.visualize_skeleton_video import (
+    ALL_BONES,
+    draw_option_b,
+    draw_skeleton,
+)
 
 # The ~15fps YOLO-body + dedicated-hand-decoder pipeline (--inference-type bodyhand)
 # reuses the building blocks of body_hand_decoder_extractor.py.
 from body_hand_decoder_extractor import (
-    HAND_SRC, L_ELBOW, L_WRIST, R_ELBOW, R_WRIST,
-    _draw_body, _draw_hand, _hand_box, _largest,
+    HAND_SRC,
+    L_ELBOW,
+    L_WRIST,
+    R_ELBOW,
+    R_WRIST,
+    _draw_body,
+    _draw_hand,
+    _hand_box,
+    _largest,
 )
 from sam_3d_body.models.meta_arch.sam3d_body import _prepare_hand_batches_gpu
 
 # COCO-17 (YOLO-pose) index → Goliath-70 index (wrists live in the hand blocks).
-_COCO2GOLIATH = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8,
-                 9: 62, 10: 41, 11: 9, 12: 10, 13: 11, 14: 12, 15: 13, 16: 14}
+_COCO2GOLIATH = {
+    0: 0,
+    1: 1,
+    2: 2,
+    3: 3,
+    4: 4,
+    5: 5,
+    6: 6,
+    7: 7,
+    8: 8,
+    9: 62,
+    10: 41,
+    11: 9,
+    12: 10,
+    13: 11,
+    14: 12,
+    15: 13,
+    16: 14,
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -88,16 +122,20 @@ class RerunViz:
     def __init__(self, mode, grpc_port, web_port, output_dir, with_retarget):
         import rerun as rr
         import rerun.blueprint as rrb
+
         self.rr = rr
 
         rr.init("fastsam3d_live")
         self.grpc_url = None
         if mode == "web":
             self.grpc_url = rr.serve_grpc(grpc_port=grpc_port)
-            rr.serve_web_viewer(web_port=web_port, open_browser=False,
-                                connect_to=self.grpc_url)
-            print(f"  Rerun UI:  ssh -L {web_port}:localhost:{web_port} ...  "
-                  f"→ http://localhost:{web_port}")
+            rr.serve_web_viewer(
+                web_port=web_port, open_browser=False, connect_to=self.grpc_url
+            )
+            print(
+                f"  Rerun UI:  ssh -L {web_port}:localhost:{web_port} ...  "
+                f"→ http://localhost:{web_port}"
+            )
             print(f"  Rerun gRPC (for the IK process): {self.grpc_url}")
         elif mode == "native":
             # The spawned viewer itself listens for gRPC connections on this port —
@@ -113,38 +151,75 @@ class RerunViz:
         # SAM3D camera frame is right-handed, Y down.
         rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
-        views_3d = [rrb.Spatial3DView(origin="world", name="3D Skeleton",
-                                      background=rrb.Background(color=[25, 25, 25]))]
+        views_3d = [
+            rrb.Spatial3DView(
+                origin="world",
+                name="3D Skeleton",
+                background=rrb.Background(color=[25, 25, 25]),
+            )
+        ]
         if with_retarget:
-            views_3d.append(rrb.Spatial3DView(origin="retarget", name="Retargeted (ACADOS IK)",
-                                              background=rrb.Background(color=[25, 25, 35])))
-        rr.send_blueprint(rrb.Blueprint(rrb.Horizontal(
-            rrb.Vertical(
-                rrb.Spatial2DView(origin="world/camera/image", name="Camera"),
-                rrb.TimeSeriesView(origin="timing", name="Latency (ms) / FPS"),
-                row_shares=[3, 1],
-            ),
-            *views_3d,
-            column_shares=[2] + [2] * len(views_3d),
-        )))
+            views_3d.append(
+                rrb.Spatial3DView(
+                    origin="retarget",
+                    name="Retargeted (ACADOS IK)",
+                    background=rrb.Background(color=[25, 25, 35]),
+                )
+            )
+        rr.send_blueprint(
+            rrb.Blueprint(
+                rrb.Horizontal(
+                    rrb.Vertical(
+                        rrb.Spatial2DView(
+                            origin="world/camera/image", name="Camera"
+                        ),
+                        rrb.TimeSeriesView(
+                            origin="timing", name="Latency (ms) / FPS"
+                        ),
+                        row_shares=[3, 1],
+                    ),
+                    *views_3d,
+                    column_shares=[2] + [2] * len(views_3d),
+                )
+            )
+        )
 
-    def log_frame(self, frame_idx, t_wall, annotated_bgr, kp3d, K,
-                  infer_ms, e2e_ms, fps, jpeg_quality=75, boxes=None):
+    def log_frame(
+        self,
+        frame_idx,
+        t_wall,
+        annotated_bgr,
+        kp3d,
+        K,
+        infer_ms,
+        e2e_ms,
+        fps,
+        jpeg_quality=75,
+        boxes=None,
+    ):
         rr = self.rr
         rr.set_time("frame", sequence=frame_idx)
         rr.set_time("time", timestamp=t_wall)
 
         # 2D bounding boxes over the camera image: body (orange) + hand crops (blue)
         arr, cols, labels = [], [], []
-        for box, col, lab in (boxes or []):
+        for box, col, lab in boxes or []:
             if box is not None and np.isfinite(box).all():
                 arr.append(np.asarray(box, np.float32))
                 cols.append(col)
                 labels.append(lab)
         if arr:
-            rr.log("world/camera/image/boxes", rr.Boxes2D(
-                array=np.stack(arr), array_format=rr.Box2DFormat.XYXY,
-                colors=cols, labels=labels, show_labels=False, radii=1.5))
+            rr.log(
+                "world/camera/image/boxes",
+                rr.Boxes2D(
+                    array=np.stack(arr),
+                    array_format=rr.Box2DFormat.XYXY,
+                    colors=cols,
+                    labels=labels,
+                    show_labels=False,
+                    radii=1.5,
+                ),
+            )
         else:
             rr.log("world/camera/image/boxes", rr.Clear(recursive=False))
 
@@ -153,35 +228,49 @@ class RerunViz:
         rr.log("timing/fps", rr.Scalars(float(fps)))
 
         rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
-        rr.log("world/camera/image", rr.Image(rgb).compress(jpeg_quality=jpeg_quality))
+        rr.log(
+            "world/camera/image",
+            rr.Image(rgb).compress(jpeg_quality=jpeg_quality),
+        )
         if K is not None:
             h, w = annotated_bgr.shape[:2]
-            rr.log("world/camera", rr.Pinhole(
-                width=w, height=h,
-                focal_length=[float(K[0, 0]), float(K[1, 1])],
-                principal_point=[float(K[0, 2]), float(K[1, 2])],
-                image_plane_distance=0.6,
-            ))
+            rr.log(
+                "world/camera",
+                rr.Pinhole(
+                    width=w,
+                    height=h,
+                    focal_length=[float(K[0, 0]), float(K[1, 1])],
+                    principal_point=[float(K[0, 2]), float(K[1, 2])],
+                    image_plane_distance=0.6,
+                ),
+            )
 
         if kp3d is None or not np.isfinite(kp3d).any():
             rr.log("world/skeleton", rr.Clear(recursive=True))
             return
         valid = np.isfinite(kp3d).all(axis=1)
-        rr.log("world/skeleton/joints", rr.Points3D(
-            positions=kp3d[valid], radii=0.012, colors=[0, 230, 0]))
+        rr.log(
+            "world/skeleton/joints",
+            rr.Points3D(
+                positions=kp3d[valid], radii=0.012, colors=[0, 230, 0]
+            ),
+        )
         strips, colors = [], []
         for a, b, rgb_c in _BONES_RGB:
             if valid[a] and valid[b]:
                 strips.append([kp3d[a].tolist(), kp3d[b].tolist()])
                 colors.append(rgb_c)
         if strips:
-            rr.log("world/skeleton/bones",
-                   rr.LineStrips3D(strips, colors=colors, radii=0.005))
+            rr.log(
+                "world/skeleton/bones",
+                rr.LineStrips3D(strips, colors=colors, radii=0.005),
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # RECORDER
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class Recorder:
     """Write raw + overlay videos and accumulate keypoints; finalized on exit."""
@@ -198,17 +287,21 @@ class Recorder:
         if self._raw is None:
             h, w = raw_bgr.shape[:2]
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            self._raw = cv2.VideoWriter(os.path.join(self.dir, "raw.mp4"),
-                                        fourcc, self.fps, (w, h))
-            self._ovl = cv2.VideoWriter(os.path.join(self.dir, "overlay.mp4"),
-                                        fourcc, self.fps, (w, h))
+            self._raw = cv2.VideoWriter(
+                os.path.join(self.dir, "raw.mp4"), fourcc, self.fps, (w, h)
+            )
+            self._ovl = cv2.VideoWriter(
+                os.path.join(self.dir, "overlay.mp4"), fourcc, self.fps, (w, h)
+            )
         self._raw.write(raw_bgr)
         self._ovl.write(overlay_bgr)
         nan2 = np.full((70, 2), np.nan, np.float32)
         nan3 = np.full((70, 3), np.nan, np.float32)
         self.kp2d.append(nan2 if kp2d is None else kp2d.astype(np.float32))
         self.kp3d.append(nan3 if kp3d is None else kp3d.astype(np.float32))
-        self.kp3d_world.append(nan3 if kp3d_world is None else kp3d_world.astype(np.float32))
+        self.kp3d_world.append(
+            nan3 if kp3d_world is None else kp3d_world.astype(np.float32)
+        )
         self.ts.append(t_wall)
 
     def close(self):
@@ -216,20 +309,31 @@ class Recorder:
             self._raw.release()
             self._ovl.release()
         if self.kp2d:
-            np.save(os.path.join(self.dir, "joints_2d.npy"), np.stack(self.kp2d))
-            np.save(os.path.join(self.dir, "joints_3d.npy"), np.stack(self.kp3d))
-            np.save(os.path.join(self.dir, "joints_3d_world.npy"), np.stack(self.kp3d_world))
-            np.save(os.path.join(self.dir, "timestamps.npy"), np.asarray(self.ts))
-            print(f"  Recording saved to {self.dir}/  "
-                  f"({len(self.kp2d)} frames @ nominal {self.fps:.1f} fps — "
-                  f"see timestamps.npy for exact timing)")
+            np.save(
+                os.path.join(self.dir, "joints_2d.npy"), np.stack(self.kp2d)
+            )
+            np.save(
+                os.path.join(self.dir, "joints_3d.npy"), np.stack(self.kp3d)
+            )
+            np.save(
+                os.path.join(self.dir, "joints_3d_world.npy"),
+                np.stack(self.kp3d_world),
+            )
+            np.save(
+                os.path.join(self.dir, "timestamps.npy"), np.asarray(self.ts)
+            )
+            print(
+                f"  Recording saved to {self.dir}/  "
+                f"({len(self.kp2d)} frames @ nominal {self.fps:.1f} fps — "
+                f"see timestamps.npy for exact timing)"
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # BODYHAND PIPELINE (YOLO body + dedicated SAM hand decoder, ~15fps design)
 # ═══════════════════════════════════════════════════════════════════════════
 
-_L_SHO, _R_SHO = 5, 6      # COCO shoulder indices
+_L_SHO, _R_SHO = 5, 6  # COCO shoulder indices
 
 
 def _hand_box_v2(k17, wrist_i, elbow_i, args):
@@ -248,13 +352,22 @@ def _hand_box_v2(k17, wrist_i, elbow_i, args):
     sho = np.array([k17[_L_SHO], k17[_R_SHO]])
     if not np.isfinite(sho).all():
         return box
-    min_side = getattr(args, "box_shoulder_frac", 0.5) * np.linalg.norm(sho[0] - sho[1])
+    min_side = getattr(args, "box_shoulder_frac", 0.5) * np.linalg.norm(
+        sho[0] - sho[1]
+    )
     side = box[2] - box[0]
     if side >= min_side:
         return box
     cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-    return np.array([cx - min_side / 2, cy - min_side / 2,
-                     cx + min_side / 2, cy + min_side / 2], np.float32)
+    return np.array(
+        [
+            cx - min_side / 2,
+            cy - min_side / 2,
+            cx + min_side / 2,
+            cy + min_side / 2,
+        ],
+        np.float32,
+    )
 
 
 def _hand_decoder_step(model, frame_bgr, k17_xy, cam_int, args):
@@ -269,19 +382,36 @@ def _hand_decoder_step(model, frame_bgr, k17_xy, cam_int, args):
     lbox = _hand_box_v2(k17_xy, L_WRIST, L_ELBOW, args)
     if rbox is None or lbox is None or cam_int is None:
         return None, None, None, None, rbox, lbox
-    out_hw = ((args.hand_res, args.hand_res) if args.hand_res > 0
-              else (model.cfg.MODEL.IMAGE_SIZE[1], model.cfg.MODEL.IMAGE_SIZE[0]))
+    out_hw = (
+        (args.hand_res, args.hand_res)
+        if args.hand_res > 0
+        else (model.cfg.MODEL.IMAGE_SIZE[1], model.cfg.MODEL.IMAGE_SIZE[0])
+    )
     with torch.no_grad(), _quiet():
         bl, br, _ = _prepare_hand_batches_gpu(
-            cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB), lbox[None], rbox[None],
-            cam_int, output_size=out_hw, padding=0.9, device="cuda")
+            cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB),
+            lbox[None],
+            rbox[None],
+            cam_int,
+            output_size=out_hw,
+            padding=0.9,
+            device="cuda",
+        )
         bh = model._merge_hand_batches(bl, br)
         model._initialize_batch(bh)
         merged = model.forward_step(bh, decoder_type="hand")
         lh, rh = model._split_hand_outputs(merged, batch_size=1)
-    kp_r = rh["mhr_hand"]["pred_keypoints_2d"][0].detach().cpu().numpy()[HAND_SRC]
-    kp_l = lh["mhr_hand"]["pred_keypoints_2d"][0].detach().cpu().numpy()[HAND_SRC].copy()
-    kp_l[:, 0] = frame_bgr.shape[1] - kp_l[:, 0] - 1         # un-flip left hand
+    kp_r = (
+        rh["mhr_hand"]["pred_keypoints_2d"][0].detach().cpu().numpy()[HAND_SRC]
+    )
+    kp_l = (
+        lh["mhr_hand"]["pred_keypoints_2d"][0]
+        .detach()
+        .cpu()
+        .numpy()[HAND_SRC]
+        .copy()
+    )
+    kp_l[:, 0] = frame_bgr.shape[1] - kp_l[:, 0] - 1  # un-flip left hand
     k3r = k3l = None
     k3 = rh["mhr_hand"].get("pred_keypoints_3d")
     if k3 is not None:
@@ -289,7 +419,7 @@ def _hand_decoder_step(model, frame_bgr, k17_xy, cam_int, args):
     k3 = lh["mhr_hand"].get("pred_keypoints_3d")
     if k3 is not None:
         k3l = k3[0].detach().cpu().numpy()[HAND_SRC].copy()
-        k3l[:, 0] *= -1                                       # un-flip left hand
+        k3l[:, 0] *= -1  # un-flip left hand
     return kp_r, kp_l, k3r, k3l, rbox, lbox
 
 
@@ -299,7 +429,8 @@ _H_WRIST, _H_MMCP = 20, 11
 
 def _anchor_hand_3d(kp3d70, sl, dec):
     """Replace one hand block of the (70,3) body pose with the decoder hand,
-    scaled to the body's wrist→middle-MCP length and anchored at the body wrist."""
+    scaled to the body's wrist→middle-MCP length and anchored at the body wrist.
+    """
     if dec is None:
         return
     bw = kp3d70[sl.start + _H_WRIST]
@@ -323,8 +454,15 @@ def _extent_box(pts, w, h, margin=0.08):
     x1, y1 = pts[v].min(0)
     x2, y2 = pts[v].max(0)
     mx, my = (x2 - x1) * margin, (y2 - y1) * margin
-    return np.array([max(x1 - mx, 0), max(y1 - my, 0),
-                     min(x2 + mx, w - 1), min(y2 + my, h - 1)], np.float32)
+    return np.array(
+        [
+            max(x1 - mx, 0),
+            max(y1 - my, 0),
+            min(x2 + mx, w - 1),
+            min(y2 + my, h - 1),
+        ],
+        np.float32,
+    )
 
 
 def _bodyhand_step(est, frame_bgr, cam_int, args):
@@ -337,23 +475,32 @@ def _bodyhand_step(est, frame_bgr, cam_int, args):
     """
     with torch.no_grad(), _quiet():
         dr = est.detector.run_human_detection(
-            frame_bgr, det_cat_id=0, bbox_thr=0.5, nms_thr=0.3,
-            default_to_full_image=False)
+            frame_bgr,
+            det_cat_id=0,
+            bbox_thr=0.5,
+            nms_thr=0.3,
+            default_to_full_image=False,
+        )
     boxes = dr["boxes"] if isinstance(dr, dict) else dr
     kps = dr.get("keypoints") if isinstance(dr, dict) else None
     sel = _largest(boxes)
     if sel is None or kps is None or len(kps) <= sel:
         return None
-    body_box = np.asarray(boxes[sel], np.float32)[:4]      # true YOLO detection box
-    k = kps[sel]                                   # (17,3) x,y,conf
+    body_box = np.asarray(boxes[sel], np.float32)[
+        :4
+    ]  # true YOLO detection box
+    k = kps[sel]  # (17,3) x,y,conf
     body = k[:, :2].copy()
     body[k[:, 2] < 0.3] = np.nan
 
     kp_r, kp_l, k3r, k3l, rbox, lbox = _hand_decoder_step(
-        est.model, frame_bgr, body, cam_int, args)
+        est.model, frame_bgr, body, cam_int, args
+    )
     h3d = np.full((70, 3), np.nan, np.float32)
-    for dec, sl, anchor in ((k3r, slice(21, 42), (+0.15, 0, 0.5)),
-                            (k3l, slice(42, 63), (-0.15, 0, 0.5))):
+    for dec, sl, anchor in (
+        (k3r, slice(21, 42), (+0.15, 0, 0.5)),
+        (k3l, slice(42, 63), (-0.15, 0, 0.5)),
+    ):
         if dec is not None:
             h3d[sl] = dec - dec[_H_WRIST] + np.asarray(anchor, np.float32)
 
@@ -371,6 +518,7 @@ def _bodyhand_step(est, frame_bgr, cam_int, args):
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def run(args, estimator, cam_int, viz, rec):
     net = args.recv_port > 0
     cap = None
@@ -387,22 +535,32 @@ def run(args, estimator, cam_int, viz, rec):
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.cap_height)
             w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            print(f"  camera capture: {w}x{h}"
-                  + ("" if (w, h) == (args.cap_width, args.cap_height)
-                     else f"  (requested {args.cap_width}x{args.cap_height} — camera negotiated down)"))
+            print(
+                f"  camera capture: {w}x{h}"
+                + (
+                    ""
+                    if (w, h) == (args.cap_width, args.cap_height)
+                    else f"  (requested {args.cap_width}x{args.cap_height} — camera negotiated down)"
+                )
+            )
 
     # The SAM estimator only knows body/full — hybrid runs a "body" SAM pass and
     # adds the dedicated hand decoder itself; bodyhand never calls the estimator.
-    kw = {"inference_type": "full" if args.inference_type == "full" else "body"}
+    kw = {
+        "inference_type": "full" if args.inference_type == "full" else "body"
+    }
     if cam_int is not None:
         kw["cam_int"] = cam_int
-    auto_est = cam_int is None and getattr(estimator, "fov_estimator", None) is not None
+    auto_est = (
+        cam_int is None
+        and getattr(estimator, "fov_estimator", None) is not None
+    )
     K_np = cam_int[0].numpy() if cam_int is not None else None
 
     img_diag = None
     cen = None
     ema = None
-    M = None            # gravity+facing alignment (locked once after warmup)
+    M = None  # gravity+facing alignment (locked once after warmup)
     align_buf = []
     frame_idx = 0
     last_recv = -1
@@ -430,13 +588,22 @@ def run(args, estimator, cam_int, viz, rec):
         if img_diag is None:
             img_diag = float(np.hypot(frame.shape[1], frame.shape[0]))
 
-        if auto_est:    # one-time MoGe2 calibration on the first frame
+        if auto_est:  # one-time MoGe2 calibration on the first frame
             with torch.no_grad():
-                K_np = estimator.fov_estimator.get_cam_intrinsics(
-                    cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).squeeze().cpu().numpy()
+                K_np = (
+                    estimator.fov_estimator.get_cam_intrinsics(
+                        cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    )
+                    .squeeze()
+                    .cpu()
+                    .numpy()
+                )
             kw["cam_int"] = torch.tensor([K_np], dtype=torch.float32)
-            print(f"  AUTO intrinsics: fx={K_np[0,0]:.0f} fy={K_np[1,1]:.0f} "
-                  f"cx={K_np[0,2]:.0f} cy={K_np[1,2]:.0f}", flush=True)
+            print(
+                f"  AUTO intrinsics: fx={K_np[0,0]:.0f} fy={K_np[1,1]:.0f} "
+                f"cx={K_np[0,2]:.0f} cy={K_np[1,2]:.0f}",
+                flush=True,
+            )
             auto_est = False
 
         # ── inference ────────────────────────────────────────────────────
@@ -449,12 +616,15 @@ def run(args, estimator, cam_int, viz, rec):
             res = _bodyhand_step(estimator, frame, kw.get("cam_int"), args)
             infer_ms = (time.perf_counter() - t0) * 1e3
             if res is not None:
-                kp, body17, kp_r, kp_l, kp3d, bx = res   # kp3d: hands-only (70,3)
+                kp, body17, kp_r, kp_l, kp3d, bx = (
+                    res  # kp3d: hands-only (70,3)
+                )
                 body_box, rbox, lbox = bx
         else:
             with torch.no_grad(), _quiet():
                 out = estimator.process_one_image(
-                    cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), **kw)
+                    cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), **kw
+                )
             infer_ms = (time.perf_counter() - t0) * 1e3
             sel = _select_person(out, cen, img_diag) if out else None
             if sel is not None:
@@ -467,7 +637,8 @@ def run(args, estimator, cam_int, viz, rec):
                     # in 2D (overlay) AND in 3D (re-anchored at the body wrists → the
                     # IK/retarget receives faithful fingers)
                     kp_r, kp_l, k3r, k3l, rbox, lbox = _hand_decoder_step(
-                        estimator.model, raw, yolo_kp, kw.get("cam_int"), args)
+                        estimator.model, raw, yolo_kp, kw.get("cam_int"), args
+                    )
                     infer_ms = (time.perf_counter() - t0) * 1e3
                     if kp_r is not None:
                         kp = kp.copy()
@@ -478,56 +649,106 @@ def run(args, estimator, cam_int, viz, rec):
                         _anchor_hand_3d(kp3d, slice(42, 63), k3l)
                         body17 = yolo_kp
                 # gravity-aligned world 3D → IK process (Proc B) + recording
-                if M is None and np.isfinite(kp3d[[0, 5, 6, 9, 10, 13, 14]]).all():
+                if (
+                    M is None
+                    and np.isfinite(kp3d[[0, 5, 6, 9, 10, 13, 14]]).all()
+                ):
                     align_buf.append(kp3d)
                     if len(align_buf) >= args.warmup:
                         M = _canonical_M(align_buf)
-                        print(f"  gravity alignment locked after {len(align_buf)} frames",
-                              flush=True)
+                        print(
+                            f"  gravity alignment locked after {len(align_buf)} frames",
+                            flush=True,
+                        )
                 if M is not None:
                     world = (M @ kp3d.T).T.astype(np.float32)
                     if args.emit_port > 0:
                         _EMIT["buf"] = world.tobytes()
-                        _EMIT["n"] = frame_idx    # frame index → synced Rerun timelines
+                        _EMIT["n"] = (
+                            frame_idx  # frame index → synced Rerun timelines
+                        )
 
         # ── overlay ──────────────────────────────────────────────────────
-        if body17 is not None:                    # bodyhand, or hybrid w/ decoder hands
+        if body17 is not None:  # bodyhand, or hybrid w/ decoder hands
             frame = _draw_body(frame, body17)
             if kp_r is not None:
                 frame = _draw_hand(frame, kp_r)
             if kp_l is not None:
                 frame = _draw_hand(frame, kp_l)
-            hud = ("YOLO body + hand decoder" if args.inference_type == "bodyhand"
-                   else "SAM3D hybrid + hand decoder")
+            hud = (
+                "YOLO body + hand decoder"
+                if args.inference_type == "bodyhand"
+                else "SAM3D hybrid + hand decoder"
+            )
         elif kp is not None:
             if yolo_kp is not None:
-                frame = draw_option_b(frame, yolo_kp, kp,
-                                      frame.shape[1], frame.shape[0], args.hand_scale)
+                frame = draw_option_b(
+                    frame,
+                    yolo_kp,
+                    kp,
+                    frame.shape[1],
+                    frame.shape[0],
+                    args.hand_scale,
+                )
             else:
                 valid = ~np.isnan(kp).any(axis=1)
-                frame = draw_skeleton(frame, kp, valid, frame.shape[1], frame.shape[0])
+                frame = draw_skeleton(
+                    frame, kp, valid, frame.shape[1], frame.shape[0]
+                )
             hud = "SAM3D 3D pose"
         else:
             hud = "SAM3D 3D pose"
         e2e_ms = (time.perf_counter() - t0) * 1e3
-        ema = 1e3 / e2e_ms if ema is None else 0.85 * ema + 0.15 * (1e3 / e2e_ms)
-        cv2.putText(frame, f"{hud}  {ema:4.1f} FPS", (14, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 4, cv2.LINE_AA)
-        cv2.putText(frame, f"{hud}  {ema:4.1f} FPS", (14, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
+        ema = (
+            1e3 / e2e_ms if ema is None else 0.85 * ema + 0.15 * (1e3 / e2e_ms)
+        )
+        cv2.putText(
+            frame,
+            f"{hud}  {ema:4.1f} FPS",
+            (14, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (0, 0, 0),
+            4,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame,
+            f"{hud}  {ema:4.1f} FPS",
+            (14, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
 
         # ── log + record ─────────────────────────────────────────────────
-        viz.log_frame(frame_idx, t_wall, frame, kp3d, K_np,
-                      infer_ms, e2e_ms, ema, jpeg_quality=args.jpeg_quality,
-                      boxes=[(body_box, (255, 140, 0), "body"),
-                             (rbox, (80, 170, 255), "hand_R"),
-                             (lbox, (80, 170, 255), "hand_L")])
+        viz.log_frame(
+            frame_idx,
+            t_wall,
+            frame,
+            kp3d,
+            K_np,
+            infer_ms,
+            e2e_ms,
+            ema,
+            jpeg_quality=args.jpeg_quality,
+            boxes=[
+                (body_box, (255, 140, 0), "body"),
+                (rbox, (80, 170, 255), "hand_R"),
+                (lbox, (80, 170, 255), "hand_L"),
+            ],
+        )
         if rec is not None:
             rec.add(raw, frame, kp, kp3d, world, t_wall)
 
         if frame_idx % 30 == 0:
-            print(f"  frame {frame_idx}  {ema:4.1f} FPS  "
-                  f"(infer {infer_ms:.0f} ms, e2e {e2e_ms:.0f} ms)", flush=True)
+            print(
+                f"  frame {frame_idx}  {ema:4.1f} FPS  "
+                f"(infer {infer_ms:.0f} ms, e2e {e2e_ms:.0f} ms)",
+                flush=True,
+            )
 
     if cap is not None:
         cap.release()
@@ -535,73 +756,141 @@ def run(args, estimator, cam_int, viz, rec):
 
 def main():
     p = argparse.ArgumentParser(
-        description="Live SAM3D → Rerun UI + recording + ACADOS IK feed")
+        description="Live SAM3D → Rerun UI + recording + ACADOS IK feed"
+    )
     p.add_argument("--source", default="0", help="webcam index or video path")
-    p.add_argument("--loop", action="store_true", help="loop a video source forever")
-    p.add_argument("--cap-width", type=int, default=1280,
-                   help="requested webcam capture width (default 1280)")
-    p.add_argument("--cap-height", type=int, default=720,
-                   help="requested webcam capture height (default 720)")
-    p.add_argument("--inference-type", choices=["body", "full", "bodyhand", "hybrid"],
-                   default="body",
-                   help="body: fast, fingers regressed by the body head (coarse); "
-                        "full: whole SAM pipeline incl. refinement (slow); "
-                        "bodyhand: YOLO body + dedicated SAM hand decoder — faithful "
-                        "fingers, but NO 3D body (IK/retarget disabled); "
-                        "hybrid: SAM body pass (3D body → IK/retarget) + hand decoder "
-                        "fingers merged in 2D and 3D — the best of both (~2 passes)")
-    p.add_argument("--box-offset", type=float, default=0.35,
-                   help="[bodyhand] push hand-box centre along elbow→wrist by this × forearm")
-    p.add_argument("--box-size", type=float, default=1.0,
-                   help="[bodyhand] hand-box side = this × forearm length")
-    p.add_argument("--box-scale-mode", choices=["stable", "forearm"], default="stable",
-                   help="stable: floor the hand-box size with the shoulder width "
-                        "(no shrink when the forearm points at the camera); "
-                        "forearm: original behaviour")
-    p.add_argument("--box-shoulder-frac", type=float, default=0.5,
-                   help="[stable] minimum hand-box side = this × projected shoulder width")
-    p.add_argument("--hand-res", type=int, default=0,
-                   help="[bodyhand] backbone input for hand crops (0=model default 512; "
-                        "256 needs the 256 engine + TRT_INPUT_SIZE=256)")
+    p.add_argument(
+        "--loop", action="store_true", help="loop a video source forever"
+    )
+    p.add_argument(
+        "--cap-width",
+        type=int,
+        default=1280,
+        help="requested webcam capture width (default 1280)",
+    )
+    p.add_argument(
+        "--cap-height",
+        type=int,
+        default=720,
+        help="requested webcam capture height (default 720)",
+    )
+    p.add_argument(
+        "--inference-type",
+        choices=["body", "full", "bodyhand", "hybrid"],
+        default="body",
+        help="body: fast, fingers regressed by the body head (coarse); "
+        "full: whole SAM pipeline incl. refinement (slow); "
+        "bodyhand: YOLO body + dedicated SAM hand decoder — faithful "
+        "fingers, but NO 3D body (IK/retarget disabled); "
+        "hybrid: SAM body pass (3D body → IK/retarget) + hand decoder "
+        "fingers merged in 2D and 3D — the best of both (~2 passes)",
+    )
+    p.add_argument(
+        "--box-offset",
+        type=float,
+        default=0.35,
+        help="[bodyhand] push hand-box centre along elbow→wrist by this × forearm",
+    )
+    p.add_argument(
+        "--box-size",
+        type=float,
+        default=1.0,
+        help="[bodyhand] hand-box side = this × forearm length",
+    )
+    p.add_argument(
+        "--box-scale-mode",
+        choices=["stable", "forearm"],
+        default="stable",
+        help="stable: floor the hand-box size with the shoulder width "
+        "(no shrink when the forearm points at the camera); "
+        "forearm: original behaviour",
+    )
+    p.add_argument(
+        "--box-shoulder-frac",
+        type=float,
+        default=0.5,
+        help="[stable] minimum hand-box side = this × projected shoulder width",
+    )
+    p.add_argument(
+        "--hand-res",
+        type=int,
+        default=0,
+        help="[bodyhand] backbone input for hand crops (0=model default 512; "
+        "256 needs the 256 engine + TRT_INPUT_SIZE=256)",
+    )
     p.add_argument("--gpu", type=int, default=0)
-    p.add_argument("--checkpoint_dir",
-                   default="/home/users/theo/code/checkpoints/sam-3d-body-dinov3")
-    p.add_argument("--detector_model", default="./checkpoints/yolo/yolo11m-pose.pt")
-    p.add_argument("--intrinsics", default="", help="npz with 'K' — skips MoGe2")
-    p.add_argument("--fx", type=float, default=0, help="fixed focal (0 = MoGe2 auto)")
+    p.add_argument(
+        "--checkpoint_dir",
+        default="/home/users/theo/code/checkpoints/sam-3d-body-dinov3",
+    )
+    p.add_argument(
+        "--detector_model", default="./checkpoints/yolo/yolo11m-pose.pt"
+    )
+    p.add_argument(
+        "--intrinsics", default="", help="npz with 'K' — skips MoGe2"
+    )
+    p.add_argument(
+        "--fx", type=float, default=0, help="fixed focal (0 = MoGe2 auto)"
+    )
     p.add_argument("--fy", type=float, default=0)
     p.add_argument("--cx", type=float, default=0)
     p.add_argument("--cy", type=float, default=0)
-    p.add_argument("--recv-port", type=int, default=0,
-                   help="if >0: receive camera frames over TCP (stream_client.py on the Mac)")
+    p.add_argument(
+        "--recv-port",
+        type=int,
+        default=0,
+        help="if >0: receive camera frames over TCP (stream_client.py on the Mac)",
+    )
     p.add_argument("--hand-scale", type=float, default=1.0)
     # Rerun
-    p.add_argument("--rerun-mode", choices=["web", "native", "save"], default="web",
-                   help="web: browser viewer over a tunnel; native: local window; "
-                        "save: .rrd file only")
+    p.add_argument(
+        "--rerun-mode",
+        choices=["web", "native", "save"],
+        default="web",
+        help="web: browser viewer over a tunnel; native: local window; "
+        "save: .rrd file only",
+    )
     p.add_argument("--rerun-grpc-port", type=int, default=9876)
     p.add_argument("--rerun-web-port", type=int, default=9090)
-    p.add_argument("--jpeg-quality", type=int, default=75,
-                   help="JPEG quality of frames sent to the Rerun viewer")
+    p.add_argument(
+        "--jpeg-quality",
+        type=int,
+        default=75,
+        help="JPEG quality of frames sent to the Rerun viewer",
+    )
     # IK feed
-    p.add_argument("--emit-port", type=int, default=8090,
-                   help="TCP port streaming gravity-aligned (70,3) 3D to the IK "
-                        "process (0 disables)")
-    p.add_argument("--warmup", type=int, default=30,
-                   help="frames before locking the gravity alignment")
+    p.add_argument(
+        "--emit-port",
+        type=int,
+        default=8090,
+        help="TCP port streaming gravity-aligned (70,3) 3D to the IK "
+        "process (0 disables)",
+    )
+    p.add_argument(
+        "--warmup",
+        type=int,
+        default=30,
+        help="frames before locking the gravity alignment",
+    )
     # Recording
-    p.add_argument("--output_dir", default="",
-                   help="recording dir (default ./output_rerun_demo/<timestamp>)")
+    p.add_argument(
+        "--output_dir",
+        default="",
+        help="recording dir (default ./output_rerun_demo/<timestamp>)",
+    )
     p.add_argument("--no-record", action="store_true")
     args = p.parse_args()
 
     if args.inference_type == "bodyhand" and args.emit_port > 0:
-        print("  NOTE: bodyhand mode has no 3D body → IK/retarget feed disabled "
-              "(use --inference-type body for the ACADOS pipeline)")
+        print(
+            "  NOTE: bodyhand mode has no 3D body → IK/retarget feed disabled "
+            "(use --inference-type body for the ACADOS pipeline)"
+        )
         args.emit_port = 0
 
     out_dir = args.output_dir or os.path.join(
-        "output_rerun_demo", time.strftime("%Y%m%d_%H%M%S"))
+        "output_rerun_demo", time.strftime("%Y%m%d_%H%M%S")
+    )
     if not args.no_record or args.rerun_mode == "save":
         os.makedirs(out_dir, exist_ok=True)
 
@@ -612,22 +901,33 @@ def main():
     elif args.fx > 0:
         w, h = 1280.0, 720.0
         if args.recv_port == 0:
-            probe = cv2.VideoCapture(int(args.source) if args.source.isdigit() else args.source)
+            probe = cv2.VideoCapture(
+                int(args.source) if args.source.isdigit() else args.source
+            )
             w = probe.get(cv2.CAP_PROP_FRAME_WIDTH) or w
             h = probe.get(cv2.CAP_PROP_FRAME_HEIGHT) or h
             probe.release()
         cx = args.cx if args.cx > 0 else w / 2.0
         cy = args.cy if args.cy > 0 else h / 2.0
-        K = np.array([[args.fx, 0, cx], [0, args.fy or args.fx, cy], [0, 0, 1]],
-                     np.float32)
+        K = np.array(
+            [[args.fx, 0, cx], [0, args.fy or args.fx, cy], [0, 0, 1]],
+            np.float32,
+        )
     cam_int = torch.tensor([K], dtype=torch.float32) if K is not None else None
     if K is not None:
-        print(f"  fixed intrinsics: fx={K[0,0]:.0f} fy={K[1,1]:.0f} "
-              f"cx={K[0,2]:.0f} cy={K[1,2]:.0f}")
+        print(
+            f"  fixed intrinsics: fx={K[0,0]:.0f} fy={K[1,1]:.0f} "
+            f"cx={K[0,2]:.0f} cy={K[1,2]:.0f}"
+        )
 
     print("[1/4] Rerun viewer...")
-    viz = RerunViz(args.rerun_mode, args.rerun_grpc_port, args.rerun_web_port,
-                   out_dir, with_retarget=args.emit_port > 0)
+    viz = RerunViz(
+        args.rerun_mode,
+        args.rerun_grpc_port,
+        args.rerun_web_port,
+        out_dir,
+        with_retarget=args.emit_port > 0,
+    )
 
     print("[2/4] Loading SAM-3D-Body...")
     det = args.detector_model
@@ -635,9 +935,13 @@ def main():
         det = det.replace(".pt", ".engine")
     estimator = setup_sam_3d_body(
         local_checkpoint_path=args.checkpoint_dir,
-        local_mhr_path=os.path.join(args.checkpoint_dir, "assets", "mhr_model.pt"),
-        detector_name="yolo_pose", detector_model=det,
-        fov_name="" if K is not None else "moge2", device="cuda",
+        local_mhr_path=os.path.join(
+            args.checkpoint_dir, "assets", "mhr_model.pt"
+        ),
+        detector_name="yolo_pose",
+        detector_model=det,
+        fov_name="" if K is not None else "moge2",
+        device="cuda",
     )
     if K is None and not (args.recv_port > 0 or args.source.isdigit()):
         print("      no intrinsics given — estimating once with MoGe2...")
@@ -647,15 +951,21 @@ def main():
 
     print("[3/4] Ports...")
     if args.recv_port > 0:
-        threading.Thread(target=_receiver, args=(args.recv_port,), daemon=True).start()
+        threading.Thread(
+            target=_receiver, args=(args.recv_port,), daemon=True
+        ).start()
     if args.emit_port > 0:
-        threading.Thread(target=_emit_server, args=(args.emit_port,), daemon=True).start()
+        threading.Thread(
+            target=_emit_server, args=(args.emit_port,), daemon=True
+        ).start()
 
     rec = None
     if not args.no_record:
         fps = 30.0
         if args.recv_port == 0:
-            probe = cv2.VideoCapture(int(args.source) if args.source.isdigit() else args.source)
+            probe = cv2.VideoCapture(
+                int(args.source) if args.source.isdigit() else args.source
+            )
             fps = probe.get(cv2.CAP_PROP_FPS) or 30.0
             probe.release()
         rec = Recorder(out_dir, fps)

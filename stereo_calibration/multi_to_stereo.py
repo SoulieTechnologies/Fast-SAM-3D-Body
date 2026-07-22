@@ -30,6 +30,7 @@ Usage:
 --pair takes the POSITIONS in the multi file (0-based, the same order given to
 calibrate_multi --cams), NOT device ids. The first becomes stereo cam0.
 """
+
 import argparse
 import os
 
@@ -40,16 +41,27 @@ import numpy as np
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__.splitlines()[1],
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--multi", default="calibration_data/multi_params.npz",
-                    help="N-camera calib from calibrate_multi.py")
-    ap.add_argument("--pair", default="0,1",
-                    help="two camera POSITIONS in the multi file (first = "
-                         "stereo cam0/reference)")
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument(
+        "--multi",
+        default="calibration_data/multi_params.npz",
+        help="N-camera calib from calibrate_multi.py",
+    )
+    ap.add_argument(
+        "--pair",
+        default="0,1",
+        help="two camera POSITIONS in the multi file (first = "
+        "stereo cam0/reference)",
+    )
     ap.add_argument("--out", default="calibration_data/stereo_params.npz")
-    ap.add_argument("--alpha", type=float, default=0.0,
-                    help="cv2.stereoRectify free-scaling (0 = crop to valid "
-                         "pixels, matches calibrate_stereo.py; 1 = keep all)")
+    ap.add_argument(
+        "--alpha",
+        type=float,
+        default=0.0,
+        help="cv2.stereoRectify free-scaling (0 = crop to valid "
+        "pixels, matches calibrate_stereo.py; 1 = keep all)",
+    )
     args = ap.parse_args()
 
     a, b = (int(x) for x in args.pair.split(","))
@@ -58,14 +70,27 @@ def main():
         if f"K{i}" not in z:
             raise SystemExit(
                 f"position {i} not in {args.multi} (keys: {sorted(z.keys())}) "
-                f"— --pair uses 0-based POSITIONS in the multi --cams order")
+                f"— --pair uses 0-based POSITIONS in the multi --cams order"
+            )
 
-    Ka, Da = z[f"K{a}"].astype(np.float64), z.get(f"D{a}", np.zeros(5)).astype(np.float64)
-    Kb, Db = z[f"K{b}"].astype(np.float64), z.get(f"D{b}", np.zeros(5)).astype(np.float64)
+    Ka, Da = z[f"K{a}"].astype(np.float64), z.get(f"D{a}", np.zeros(5)).astype(
+        np.float64
+    )
+    Kb, Db = z[f"K{b}"].astype(np.float64), z.get(f"D{b}", np.zeros(5)).astype(
+        np.float64
+    )
     Ra = z[f"R{a}"].astype(np.float64) if f"R{a}" in z else np.eye(3)
     Rb = z[f"R{b}"].astype(np.float64) if f"R{b}" in z else np.eye(3)
-    Ta = z[f"T{a}"].astype(np.float64).reshape(3) if f"T{a}" in z else np.zeros(3)
-    Tb = z[f"T{b}"].astype(np.float64).reshape(3) if f"T{b}" in z else np.zeros(3)
+    Ta = (
+        z[f"T{a}"].astype(np.float64).reshape(3)
+        if f"T{a}" in z
+        else np.zeros(3)
+    )
+    Tb = (
+        z[f"T{b}"].astype(np.float64).reshape(3)
+        if f"T{b}" in z
+        else np.zeros(3)
+    )
     img_size = tuple(int(x) for x in z["img_size"])
 
     # relative pose: x_b = R x_a + T
@@ -75,16 +100,27 @@ def main():
     print(f"pair cam{a}->cam{b}: baseline {baseline_cm:.1f} cm")
 
     R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(
-        Ka, Da, Kb, Db, img_size, R, T, alpha=args.alpha)
+        Ka, Da, Kb, Db, img_size, R, T, alpha=args.alpha
+    )
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    np.savez(args.out,
-             K1=Ka, D1=Da, K2=Kb, D2=Db,
-             R=R, T=T,
-             R1=R1, R2=R2, P1=P1, P2=P2, Q=Q,
-             img_size=np.array(img_size),
-             source_multi=os.path.abspath(args.multi),
-             source_pair=np.array([a, b]))
+    np.savez(
+        args.out,
+        K1=Ka,
+        D1=Da,
+        K2=Kb,
+        D2=Db,
+        R=R,
+        T=T,
+        R1=R1,
+        R2=R2,
+        P1=P1,
+        P2=P2,
+        Q=Q,
+        img_size=np.array(img_size),
+        source_multi=os.path.abspath(args.multi),
+        source_pair=np.array([a, b]),
+    )
     print(f"Saved rectified stereo (cam{a}=cam0, cam{b}=cam1) -> {args.out}")
     print(f"Run: python ../extract_two_cameras.py --stereo {args.out} ...")
 

@@ -75,7 +75,11 @@ def view_visibility(normal, wrist_w, R, T):
     Returns None (neutral) when the normal is unknown or the wrist is
     missing/at the camera centre.
     """
-    if normal is None or wrist_w is None or not np.isfinite(np.asarray(wrist_w)).all():
+    if (
+        normal is None
+        or wrist_w is None
+        or not np.isfinite(np.asarray(wrist_w)).all()
+    ):
         return None
     ray = np.asarray(R) @ np.asarray(wrist_w) + np.asarray(T).reshape(3)
     d = np.linalg.norm(ray)
@@ -86,8 +90,13 @@ def view_visibility(normal, wrist_w, R, T):
 
 def in_frame_fraction(center_xy, side_px, width, height):
     """Area fraction of a side_px box centred at center_xy inside the image."""
-    if (center_xy is None or side_px is None or not np.isfinite(side_px)
-            or side_px <= 0 or not np.isfinite(np.asarray(center_xy)).all()):
+    if (
+        center_xy is None
+        or side_px is None
+        or not np.isfinite(side_px)
+        or side_px <= 0
+        or not np.isfinite(np.asarray(center_xy)).all()
+    ):
         return None
     cx, cy = center_xy
     h = side_px / 2.0
@@ -110,12 +119,23 @@ def rank_views(cands, prev=(), switch_bonus=1.15):
     scores = {}
     for v, c in cands.items():
         s = c.get("size")
-        size_n = (s / smax) if (smax and s is not None and np.isfinite(s)
-                                and s > 0) else 0.5
+        size_n = (
+            (s / smax)
+            if (smax and s is not None and np.isfinite(s) and s > 0)
+            else 0.5
+        )
         vis = c.get("vis")
-        vis_f = 1.0 if vis is None else VIS_FLOOR + (1 - VIS_FLOOR) * min(max(vis, 0.0), 1.0)
+        vis_f = (
+            1.0
+            if vis is None
+            else VIS_FLOOR + (1 - VIS_FLOOR) * min(max(vis, 0.0), 1.0)
+        )
         conf = c.get("conf")
-        conf_f = 1.0 if conf is None else CONF_FLOOR + (1 - CONF_FLOOR) * min(max(conf, 0.0), 1.0)
+        conf_f = (
+            1.0
+            if conf is None
+            else CONF_FLOOR + (1 - CONF_FLOOR) * min(max(conf, 0.0), 1.0)
+        )
         inf = c.get("in_frame")
         inf_f = 1.0 if inf is None else min(max(inf, 0.0), 1.0)
         sc = size_n * vis_f * conf_f * inf_f

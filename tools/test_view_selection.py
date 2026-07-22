@@ -12,33 +12,38 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from hand_view_select import (in_frame_fraction, palm_normal, rank_views,
-                              select_views, view_visibility)
+from utils.hand_view_select import (
+    in_frame_fraction,
+    palm_normal,
+    rank_views,
+    select_views,
+    view_visibility,
+)
 
 
 def look_at(cam_pos, target=(0, 0, 0)):
     """World->cam R,T with +z toward target (y roughly down)."""
     z = np.asarray(target, float) - np.asarray(cam_pos, float)
     z /= np.linalg.norm(z)
-    up = np.array([0.0, -1.0, 0.0])                 # world y-up
+    up = np.array([0.0, -1.0, 0.0])  # world y-up
     x = np.cross(up, z)
-    if np.linalg.norm(x) < 1e-6:                    # looking straight down
+    if np.linalg.norm(x) < 1e-6:  # looking straight down
         x = np.array([1.0, 0.0, 0.0])
     x /= np.linalg.norm(x)
     y = np.cross(z, x)
-    R = np.stack([x, y, z])                         # rows = cam axes in world
+    R = np.stack([x, y, z])  # rows = cam axes in world
     T = -R @ np.asarray(cam_pos, float)
     return R, T
 
 
 # subject at origin; world: x right, y up, z toward the front cams
 CAMS = {
-    0: look_at([-0.6, 1.6, 2.5]),                   # front-left  (ceiling)
-    1: look_at([+0.6, 1.6, 2.5]),                   # front-right (ceiling)
-    2: look_at([-2.5, 1.6, 0.0]),                   # left side
-    3: look_at([+2.5, 1.6, 0.0]),                   # right side
+    0: look_at([-0.6, 1.6, 2.5]),  # front-left  (ceiling)
+    1: look_at([+0.6, 1.6, 2.5]),  # front-right (ceiling)
+    2: look_at([-2.5, 1.6, 0.0]),  # left side
+    3: look_at([+2.5, 1.6, 0.0]),  # right side
 }
-WRIST = np.array([0.15, 0.0, 0.3])                  # right hand, slightly front
+WRIST = np.array([0.15, 0.0, 0.3])  # right hand, slightly front
 
 
 def hand_markers(normal_dir):
@@ -65,8 +70,9 @@ def test_palm_normal():
     n = palm_normal(w, t, p)
     assert abs(abs(n @ [0, 0, 1]) - 1) < 1e-9, "normal should be +-z"
     assert palm_normal(w, t, np.full(3, np.nan)) is None, "missing marker"
-    assert palm_normal(w, w + [0.09, 0, 0], w + [0.18, 0, 0]) is None, \
-        "collinear markers must be degenerate"
+    assert (
+        palm_normal(w, w + [0.09, 0, 0], w + [0.18, 0, 0]) is None
+    ), "collinear markers must be degenerate"
     print("  palm_normal ok")
 
 
@@ -81,10 +87,10 @@ def test_visibility_front_vs_side():
     assert vis[2] > max(vis[0], vis[1]), f"left cam should win: {vis}"
     # fingers pointing at cam0 = line of sight IN the palm plane (palm down)
     w = WRIST
-    ray = (np.asarray([-0.6, 1.6, 2.5]) - w)
-    a = ray / np.linalg.norm(ray)                    # fingers along the ray
+    ray = np.asarray([-0.6, 1.6, 2.5]) - w
+    a = ray / np.linalg.norm(ray)  # fingers along the ray
     b = np.cross([0, 1, 0], a)
-    b /= np.linalg.norm(b)                           # in-plane, horizontal-ish
+    b /= np.linalg.norm(b)  # in-plane, horizontal-ish
     n = palm_normal(w, w + 0.09 * a, w + 0.09 * b)
     v0 = view_visibility(n, w, *CAMS[0])
     assert v0 < 0.1, f"fingers-at-camera must be near edge-on: {v0}"
@@ -102,30 +108,40 @@ def test_in_frame_fraction():
 def test_ranking_and_hysteresis():
     # equal size: visibility decides
     vis = vis_all([0, 0, 1])
-    cands = {v: {"size": 200.0, "vis": vis[v], "conf": 1.0, "in_frame": 1.0}
-             for v in CAMS}
+    cands = {
+        v: {"size": 200.0, "vis": vis[v], "conf": 1.0, "in_frame": 1.0}
+        for v in CAMS
+    }
     sel, order, sc = select_views(cands, 2)
     assert set(sel) == {0, 1}, f"front cams should be picked: {order} {sc}"
     # big-but-edge-on loses to slightly smaller flat view
-    cands = {0: {"size": 150.0, "vis": 0.95, "conf": 1.0, "in_frame": 1.0},
-             2: {"size": 200.0, "vis": 0.05, "conf": 1.0, "in_frame": 1.0}}
+    cands = {
+        0: {"size": 150.0, "vis": 0.95, "conf": 1.0, "in_frame": 1.0},
+        2: {"size": 200.0, "vis": 0.05, "conf": 1.0, "in_frame": 1.0},
+    }
     sel, _, _ = select_views(cands, 1)
     assert sel == [0], "flat 150px crop must beat edge-on 200px crop"
     # occluded view (low NLF conf) demoted despite big crop
-    cands = {0: {"size": 160.0, "vis": 0.8, "conf": 0.9, "in_frame": 1.0},
-             3: {"size": 200.0, "vis": 0.8, "conf": 0.05, "in_frame": 1.0}}
+    cands = {
+        0: {"size": 160.0, "vis": 0.8, "conf": 0.9, "in_frame": 1.0},
+        3: {"size": 200.0, "vis": 0.8, "conf": 0.05, "in_frame": 1.0},
+    }
     sel, _, _ = select_views(cands, 1)
     assert sel == [0], "body-occluded view must lose"
     # hysteresis: a marginally better newcomer does NOT evict
-    cands = {0: {"size": 190.0, "vis": 0.8, "conf": 1.0, "in_frame": 1.0},
-             1: {"size": 200.0, "vis": 0.8, "conf": 1.0, "in_frame": 1.0}}
+    cands = {
+        0: {"size": 190.0, "vis": 0.8, "conf": 1.0, "in_frame": 1.0},
+        1: {"size": 200.0, "vis": 0.8, "conf": 1.0, "in_frame": 1.0},
+    }
     sel, _, _ = select_views(cands, 1, prev={0}, switch_bonus=1.15)
     assert sel == [0], "hysteresis should hold the current view"
     sel, _, _ = select_views(cands, 1, prev={0}, switch_bonus=1.0)
     assert sel == [1], "without bonus the bigger crop wins"
     # missing components are neutral -> falls back to biggest-crop
-    cands = {v: {"size": s, "vis": None, "conf": None, "in_frame": None}
-             for v, s in ((0, 120.0), (1, 90.0), (2, 200.0), (3, 150.0))}
+    cands = {
+        v: {"size": s, "vis": None, "conf": None, "in_frame": None}
+        for v, s in ((0, 120.0), (1, 90.0), (2, 200.0), (3, 150.0))
+    }
     sel, _, _ = select_views(cands, 2)
     assert set(sel) == {2, 3}, "no 3D -> biggest crops win"
     print("  ranking + hysteresis ok")
@@ -134,7 +150,7 @@ def test_ranking_and_hysteresis():
 def test_ray_dependence():
     # same normal, but a wrist far off-axis changes each cam's ray: visibility
     # must use the actual camera->wrist ray, not the optical axis
-    w = np.array([0.0, 0.0, 2.4])                    # right next to front cams
+    w = np.array([0.0, 0.0, 2.4])  # right next to front cams
     n = np.array([0.0, 0.0, 1.0])
     v_near = view_visibility(n, w, *CAMS[0])
     v_far = view_visibility(n, WRIST, *CAMS[0])
@@ -142,24 +158,31 @@ def test_ray_dependence():
     print("  ray dependence ok")
 
 
-
-
 def test_ray_diversity():
-    from hand_view_select import _sin_angle
+    from utils.hand_view_select import _sin_angle
+
     assert _sin_angle([1, 0, 0], [0, 1, 0]) == 1.0
     assert _sin_angle([1, 0, 0], [2, 0, 0]) < 1e-9
-    centers = {0: [-0.6, 1.6, 2.5], 1: [0.6, 1.6, 2.5],
-               2: [-2.5, 1.6, 0.0], 3: [2.5, 1.6, 0.0]}
+    centers = {
+        0: [-0.6, 1.6, 2.5],
+        1: [0.6, 1.6, 2.5],
+        2: [-2.5, 1.6, 0.0],
+        3: [2.5, 1.6, 0.0],
+    }
     rays = {v: WRIST - np.asarray(c, float) for v, c in centers.items()}
     # equal scores: the second pick must avoid the near-parallel front pair
-    cands = {v: {"size": 200.0, "vis": None, "conf": None, "in_frame": None}
-             for v in centers}
+    cands = {
+        v: {"size": 200.0, "vis": None, "conf": None, "in_frame": None}
+        for v in centers
+    }
     sel, _, _ = select_views(cands, 2, rays=rays)
     assert sel[0] == 0 and sel[1] in (2, 3), f"wide pair expected: {sel}"
     # but a clearly better view still beats diversity (side cams edge-on)
-    cands = {0: {"size": 200.0, "vis": 0.8, "conf": 1.0, "in_frame": 1.0},
-             1: {"size": 200.0, "vis": 0.8, "conf": 1.0, "in_frame": 1.0},
-             3: {"size": 200.0, "vis": 0.05, "conf": 1.0, "in_frame": 1.0}}
+    cands = {
+        0: {"size": 200.0, "vis": 0.8, "conf": 1.0, "in_frame": 1.0},
+        1: {"size": 200.0, "vis": 0.8, "conf": 1.0, "in_frame": 1.0},
+        3: {"size": 200.0, "vis": 0.05, "conf": 1.0, "in_frame": 1.0},
+    }
     sel, _, _ = select_views(cands, 2, rays=rays)
     assert set(sel) == {0, 1}, f"edge-on side cam must still lose: {sel}"
     # no rays -> plain top-k unchanged

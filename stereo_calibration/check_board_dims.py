@@ -3,6 +3,7 @@ Shows detected marker IDs so you can confirm the board's actual col/row dimensio
 Run while holding the board in front of the camera.
 Press 'q' to quit.
 """
+
 import cv2
 import argparse
 
@@ -24,11 +25,22 @@ while True:
     if ids is not None:
         cv2.aruco.drawDetectedMarkers(frame, corners, ids)
         id_list = sorted(ids.ravel().tolist())
-        cv2.putText(frame, f"markers: {len(ids)}  max_id: {max(id_list)}  ids: {id_list[:8]}...",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        print(f"\rDetected {len(ids)} markers, IDs: {id_list}          ", end="", flush=True)
+        cv2.putText(
+            frame,
+            f"markers: {len(ids)}  max_id: {max(id_list)}  ids: {id_list[:8]}...",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 0),
+            2,
+        )
+        print(
+            f"\rDetected {len(ids)} markers, IDs: {id_list}          ",
+            end="",
+            flush=True,
+        )
     cv2.imshow("Board check", frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
 cap.release()

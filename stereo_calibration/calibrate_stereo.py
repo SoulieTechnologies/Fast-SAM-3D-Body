@@ -14,6 +14,7 @@ Outputs:
         R1, R2, P1, P2, Q — rectification output
         rms               — stereo reprojection error
 """
+
 import glob
 import cv2
 import numpy as np
@@ -23,13 +24,15 @@ board, dictionary = board_config.make_board()
 detector_params = cv2.aruco.DetectorParameters()
 aruco_detector = cv2.aruco.ArucoDetector(dictionary, detector_params)
 
+
 # Load per-camera intrinsics
 def load_intrinsics(cam):
     data = np.load(f"calibration_data/{cam}_intrinsics.npz")
     return data["K"], data["D"], tuple(data["img_size"])
 
+
 K1, D1, img_size = load_intrinsics("cam0")
-K2, D2, _        = load_intrinsics("cam1")
+K2, D2, _ = load_intrinsics("cam1")
 
 paths0 = sorted(glob.glob("images/cam0/*.png"))
 paths1 = sorted(glob.glob("images/cam1/*.png"))
@@ -45,7 +48,8 @@ for p0, p1 in zip(paths0, paths1):
 
     def get_charuco(gray):
         ch_corners, ch_ids, _, _ = board_config.detect_charuco(
-            gray, board, dictionary, min_corners=6)
+            gray, board, dictionary, min_corners=6
+        )
         return ch_corners, ch_ids
 
     ch0, ids0 = get_charuco(gray0)
@@ -80,13 +84,16 @@ for p0, p1 in zip(paths0, paths1):
 print(f"\nUsing {len(obj_points_all)} frame pairs for stereo calibration")
 assert len(obj_points_all) >= 10, "Need at least 10 valid pairs."
 
-flags = (cv2.CALIB_FIX_INTRINSIC)   # intrinsics already refined per-camera
+flags = cv2.CALIB_FIX_INTRINSIC  # intrinsics already refined per-camera
 
 rms, K1, D1, K2, D2, R, T, E, F = cv2.stereoCalibrate(
     obj_points_all,
     img_points0_all,
     img_points1_all,
-    K1, D1, K2, D2,
+    K1,
+    D1,
+    K2,
+    D2,
     img_size,
     flags=flags,
     criteria=(cv2.TERM_CRITERIA_MAX_ITER + cv2.TERM_CRITERIA_EPS, 100, 1e-5),
@@ -101,12 +108,25 @@ R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(
 )
 
 import os
+
 os.makedirs("calibration_data", exist_ok=True)
 out = "calibration_data/stereo_params.npz"
-np.savez(out,
-         K1=K1, D1=D1, K2=K2, D2=D2,
-         R=R, T=T, E=E, F=F,
-         R1=R1, R2=R2, P1=P1, P2=P2, Q=Q,
-         rms=rms,
-         img_size=np.array(img_size))
+np.savez(
+    out,
+    K1=K1,
+    D1=D1,
+    K2=K2,
+    D2=D2,
+    R=R,
+    T=T,
+    E=E,
+    F=F,
+    R1=R1,
+    R2=R2,
+    P1=P1,
+    P2=P2,
+    Q=Q,
+    rms=rms,
+    img_size=np.array(img_size),
+)
 print(f"\nSaved → {out}")

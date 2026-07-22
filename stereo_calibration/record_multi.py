@@ -26,6 +26,7 @@ match what capture_calibration_multi.py used (autofocus drifts K).
 
 Controls:  r = start/stop recording   q = quit (saves if recording)
 """
+
 import argparse
 import json
 import os
@@ -37,42 +38,70 @@ import cv2
 import numpy as np
 
 p = argparse.ArgumentParser()
-p.add_argument("--cams", default="0,1,2,3",
-               help="comma-separated camera indices OR /dev/v4l/by-id paths "
-                    "(stable across reboots — recommended with identical cams); "
-                    "order MUST match the calibration --cams / K0..K{n}")
+p.add_argument(
+    "--cams",
+    default="0,1,2,3",
+    help="comma-separated camera indices OR /dev/v4l/by-id paths "
+    "(stable across reboots — recommended with identical cams); "
+    "order MUST match the calibration --cams / K0..K{n}",
+)
 p.add_argument("--name", default=time.strftime("%Y%m%d_%H%M%S"))
-p.add_argument("--fps", type=float, default=30.0,
-               help="requested camera fps AND the container fps written; the "
-                    "true rate is in timestamps.npy regardless")
+p.add_argument(
+    "--fps",
+    type=float,
+    default=30.0,
+    help="requested camera fps AND the container fps written; the "
+    "true rate is in timestamps.npy regardless",
+)
 p.add_argument("--width", type=int, default=1920)
 p.add_argument("--height", type=int, default=1080)
-p.add_argument("--rotate180", action="store_true",
-               help="bake a 180° flip into every file (upside-down mount) — "
-                    "match the calibration; then don't re-flip at replay")
-p.add_argument("--lock-focus", action="store_true",
-               help="disable autofocus on every camera (match calibration; "
-                    "no-op on fixed-focus models)")
-p.add_argument("--focus", type=float, default=None,
-               help="fixed manual focus (implies --lock-focus); use the SAME "
-                    "value as during calibration")
-p.add_argument("--exposure", type=float, default=None,
-               help="fixed manual exposure on all cams (else camera default)")
+p.add_argument(
+    "--rotate180",
+    action="store_true",
+    help="bake a 180° flip into every file (upside-down mount) — "
+    "match the calibration; then don't re-flip at replay",
+)
+p.add_argument(
+    "--lock-focus",
+    action="store_true",
+    help="disable autofocus on every camera (match calibration; "
+    "no-op on fixed-focus models)",
+)
+p.add_argument(
+    "--focus",
+    type=float,
+    default=None,
+    help="fixed manual focus (implies --lock-focus); use the SAME "
+    "value as during calibration",
+)
+p.add_argument(
+    "--exposure",
+    type=float,
+    default=None,
+    help="fixed manual exposure on all cams (else camera default)",
+)
 p.add_argument("--gain", type=float, default=None)
-p.add_argument("--codec", default="mp4v",
-               help="VideoWriter fourcc (mp4v = compatible default; try MJPG "
-                    "for lighter compression at a larger file)")
-p.add_argument("--queue", type=int, default=64,
-               help="max buffered frame sets per camera before a set is "
-                    "dropped to protect capture (raise if you have RAM and see "
-                    "drops; a drop is reported live)")
+p.add_argument(
+    "--codec",
+    default="mp4v",
+    help="VideoWriter fourcc (mp4v = compatible default; try MJPG "
+    "for lighter compression at a larger file)",
+)
+p.add_argument(
+    "--queue",
+    type=int,
+    default=64,
+    help="max buffered frame sets per camera before a set is "
+    "dropped to protect capture (raise if you have RAM and see "
+    "drops; a drop is reported live)",
+)
 p.add_argument("--display-width", type=int, default=1600)
 args = p.parse_args()
 
 W, H = args.width, args.height
 _toks = [x.strip() for x in args.cams.split(",")]
 cam_ids = [int(x) if x.isdigit() else x for x in _toks]
-cam_labs = list(range(len(cam_ids)))            # files/positions are 0..n-1
+cam_labs = list(range(len(cam_ids)))  # files/positions are 0..n-1
 ncam = len(cam_ids)
 out_dir = os.path.join("recordings", args.name)
 os.makedirs(out_dir, exist_ok=True)
@@ -86,7 +115,7 @@ def open_cam(cid):
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, H)
     cap.set(cv2.CAP_PROP_FPS, args.fps)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)         # freshest frame, low latency
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # freshest frame, low latency
     if args.exposure is not None:
         cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
         cap.set(cv2.CAP_PROP_EXPOSURE, args.exposure)
@@ -98,9 +127,14 @@ def open_cam(cid):
             cap.set(cv2.CAP_PROP_FOCUS, args.focus)
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f"  cam {cid}: {w}x{h}"
-          + (f" focus={cap.get(cv2.CAP_PROP_FOCUS):g}"
-             if (args.lock_focus or args.focus is not None) else ""))
+    print(
+        f"  cam {cid}: {w}x{h}"
+        + (
+            f" focus={cap.get(cv2.CAP_PROP_FOCUS):g}"
+            if (args.lock_focus or args.focus is not None)
+            else ""
+        )
+    )
     if w != W or h != H:
         print(f"  WARNING: cam {cid} refused {W}x{H} — got {w}x{h}")
     return cap
@@ -108,7 +142,7 @@ def open_cam(cid):
 
 caps = [open_cam(c) for c in cam_ids]
 
-latest = [None] * ncam            # freshest (frame, retrieve_ts) per cam
+latest = [None] * ncam  # freshest (frame, retrieve_ts) per cam
 lock = threading.Lock()
 stop = threading.Event()
 cap_fps = [0.0] * ncam
@@ -129,7 +163,9 @@ def grab_loop():
                 f = cv2.rotate(f, cv2.ROTATE_180)
             if tprev[i] is not None and now > tprev[i]:
                 inst = 1.0 / (now - tprev[i])
-                cap_fps[i] = inst if cap_fps[i] == 0 else 0.9 * cap_fps[i] + 0.1 * inst
+                cap_fps[i] = (
+                    inst if cap_fps[i] == 0 else 0.9 * cap_fps[i] + 0.1 * inst
+                )
             tprev[i] = now
             with lock:
                 latest[i] = (f, now)
@@ -156,16 +192,19 @@ def writer_loop(i):
     vw.release()
 
 
-writers = []                      # started on first record
+writers = []  # started on first record
 recording = False
-n = 0                             # committed frame sets
+n = 0  # committed frame sets
 dropped = 0
-ts_rows = []                      # (ncam,) retrieve wall-times per committed set
+ts_rows = []  # (ncam,) retrieve wall-times per committed set
 
 WIN = "Multi Record  [r=rec q=quit]"
 cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-print(f"Output -> {out_dir}/cam0..cam{ncam-1}.mp4  ({W}x{H}"
-      + (", flipped 180" if args.rotate180 else "") + ")")
+print(
+    f"Output -> {out_dir}/cam0..cam{ncam-1}.mp4  ({W}x{H}"
+    + (", flipped 180" if args.rotate180 else "")
+    + ")"
+)
 print("r = start/stop,  q = quit")
 
 
@@ -177,8 +216,10 @@ def start_writers():
                 q.get_nowait()
             except queue.Empty:
                 break
-    writers = [threading.Thread(target=writer_loop, args=(i,), daemon=True)
-               for i in range(ncam)]
+    writers = [
+        threading.Thread(target=writer_loop, args=(i,), daemon=True)
+        for i in range(ncam)
+    ]
     for t in writers:
         t.start()
 
@@ -195,16 +236,19 @@ def grid(imgs):
     rows = int(np.ceil(len(imgs) / cols))
     blank = np.zeros_like(imgs[0])
     cells = imgs + [blank] * (rows * cols - len(imgs))
-    m = cv2.vconcat([cv2.hconcat(cells[r * cols:(r + 1) * cols])
-                     for r in range(rows)])
+    m = cv2.vconcat(
+        [cv2.hconcat(cells[r * cols : (r + 1) * cols]) for r in range(rows)]
+    )
     s = min(1.0, args.display_width / m.shape[1])
     return cv2.resize(m, None, fx=s, fy=s) if s < 1.0 else m
 
 
 while True:
     with lock:
-        snap = [None if latest[i] is None else (latest[i][0], latest[i][1])
-                for i in range(ncam)]
+        snap = [
+            None if latest[i] is None else (latest[i][0], latest[i][1])
+            for i in range(ncam)
+        ]
     if any(s is None for s in snap):
         if (cv2.waitKey(30) & 0xFF) == ord("q"):
             break
@@ -225,14 +269,29 @@ while True:
         d = snap[i][0].copy()
         txt = f"REC {n}" if recording else "READY - r"
         col = (0, 0, 255) if recording else (0, 255, 0)
-        cv2.putText(d, f"cam{i} {txt}", (12, 42),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.1, col, 3)
-        cv2.putText(d, f"{cap_fps[i]:.0f} fps", (12, 84),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+        cv2.putText(
+            d, f"cam{i} {txt}", (12, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.1, col, 3
+        )
+        cv2.putText(
+            d,
+            f"{cap_fps[i]:.0f} fps",
+            (12, 84),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 255, 0),
+            2,
+        )
         disps.append(d)
     if dropped:
-        cv2.putText(disps[0], f"DROPPED {dropped} sets (encoder slow)",
-                    (12, 126), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        cv2.putText(
+            disps[0],
+            f"DROPPED {dropped} sets (encoder slow)",
+            (12, 126),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 255),
+            2,
+        )
     cv2.imshow(WIN, grid(disps))
 
     k = cv2.waitKey(1) & 0xFF
@@ -245,12 +304,21 @@ while True:
         else:
             recording = False
             stop_writers()
-            np.save(os.path.join(out_dir, "timestamps.npy"),
-                    np.asarray(ts_rows, np.float64))
-            meta = {"cams": [str(c) for c in cam_ids], "ncam": ncam,
-                    "width": W, "height": H, "fps": args.fps,
-                    "rotate180": args.rotate180, "codec": args.codec,
-                    "frames": n, "dropped": dropped}
+            np.save(
+                os.path.join(out_dir, "timestamps.npy"),
+                np.asarray(ts_rows, np.float64),
+            )
+            meta = {
+                "cams": [str(c) for c in cam_ids],
+                "ncam": ncam,
+                "width": W,
+                "height": H,
+                "fps": args.fps,
+                "rotate180": args.rotate180,
+                "codec": args.codec,
+                "frames": n,
+                "dropped": dropped,
+            }
             with open(os.path.join(out_dir, "meta.json"), "w") as fp:
                 json.dump(meta, fp, indent=2)
             print(f"saved {n} sets ({dropped} dropped) -> {out_dir}/")
@@ -260,12 +328,16 @@ while True:
 stop.set()
 if recording:
     stop_writers()
-    np.save(os.path.join(out_dir, "timestamps.npy"),
-            np.asarray(ts_rows, np.float64))
+    np.save(
+        os.path.join(out_dir, "timestamps.npy"),
+        np.asarray(ts_rows, np.float64),
+    )
     print(f"saved {n} sets ({dropped} dropped) -> {out_dir}/")
 for cap in caps:
     cap.release()
 cv2.destroyAllWindows()
-print(f"Done. Infer later: python ../cosmik_hand_demo.py --cams {args.cams} "
-      f"--calib calibration_data/multi_params.npz --cap-width {W} "
-      f"--cap-height {H} --replay {out_dir}")
+print(
+    f"Done. Infer later: python ../cosmik_hand_demo.py --cams {args.cams} "
+    f"--calib calibration_data/multi_params.npz --cap-width {W} "
+    f"--cap-height {H} --replay {out_dir}"
+)

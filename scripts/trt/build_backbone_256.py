@@ -9,6 +9,7 @@ the size constants.
 Run:  CUDA_VISIBLE_DEVICES=7 python scripts/trt/build_backbone_256.py
 Output: checkpoints/sam-3d-body-dinov3/backbone_trt/backbone_dinov3_fp16_256.engine
 """
+
 import os
 import sys
 

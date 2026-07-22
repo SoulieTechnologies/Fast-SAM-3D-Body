@@ -10,6 +10,7 @@ The 180 flip is BAKED into the files, so downstream you read them as-is:
 
 Controls:  r = start/stop recording   q = quit (saves if recording)
 """
+
 import argparse
 import os
 import threading
@@ -37,8 +38,10 @@ def open_cam(idx):
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, H)
     cap.set(cv2.CAP_PROP_FPS, args.fps)
-    print(f"  cam {idx}: {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
-          f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}")
+    print(
+        f"  cam {idx}: {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
+        f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}"
+    )
     return cap
 
 
@@ -53,11 +56,11 @@ def grab_loop():
     global frame0, frame1
     while not stop.is_set():
         cap0.grab()
-        cap1.grab()                       # grab both, then retrieve both (sync)
+        cap1.grab()  # grab both, then retrieve both (sync)
         r0, f0 = cap0.retrieve()
         r1, f1 = cap1.retrieve()
         if r0 and r1:
-            with lock:                    # flip 180 baked in
+            with lock:  # flip 180 baked in
                 frame0 = cv2.rotate(f0, cv2.ROTATE_180)
                 frame1 = cv2.rotate(f1, cv2.ROTATE_180)
 
@@ -94,25 +97,35 @@ while True:
     for d in (d0, d1):
         cv2.putText(d, txt, (12, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.2, col, 3)
     both = cv2.hconcat([d0, d1])
-    cv2.imshow(WIN, cv2.resize(both, (1600, int(1600 * both.shape[0] / both.shape[1]))))
+    cv2.imshow(
+        WIN,
+        cv2.resize(both, (1600, int(1600 * both.shape[0] / both.shape[1]))),
+    )
 
     k = cv2.waitKey(1) & 0xFF
     if k == ord("r"):
         if not recording:
-            writer0 = cv2.VideoWriter(f"{out_dir}/cam0.mp4", fourcc, args.fps, (W, H))
-            writer1 = cv2.VideoWriter(f"{out_dir}/cam1.mp4", fourcc, args.fps, (W, H))
+            writer0 = cv2.VideoWriter(
+                f"{out_dir}/cam0.mp4", fourcc, args.fps, (W, H)
+            )
+            writer1 = cv2.VideoWriter(
+                f"{out_dir}/cam1.mp4", fourcc, args.fps, (W, H)
+            )
             n, recording = 0, True
             print("recording...")
         else:
             recording = False
-            writer0.release(); writer1.release()
+            writer0.release()
+            writer1.release()
             print(f"saved {n} frames -> {out_dir}/")
     elif k == ord("q"):
         break
 
 stop.set()
 if recording and writer0 is not None:
-    writer0.release(); writer1.release()
+    writer0.release()
+    writer1.release()
     print(f"saved {n} frames -> {out_dir}/")
-cap0.release(); cap1.release()
+cap0.release()
+cap1.release()
 cv2.destroyAllWindows()

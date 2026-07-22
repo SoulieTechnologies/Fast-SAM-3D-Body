@@ -6,6 +6,7 @@ Usage example:
     tri = StereoTriangulator("calibration_data/stereo_params.npz")
     pts3d = tri.triangulate(pts_left, pts_right)  # Nx2 float32 arrays
 """
+
 import cv2
 import numpy as np
 
@@ -13,17 +14,17 @@ import numpy as np
 class StereoTriangulator:
     def __init__(self, stereo_npz: str):
         data = np.load(stereo_npz)
-        self.K1  = data["K1"]
-        self.D1  = data["D1"]
-        self.K2  = data["K2"]
-        self.D2  = data["D2"]
-        self.R   = data["R"]
-        self.T   = data["T"]
-        self.P1  = data["P1"]
-        self.P2  = data["P2"]
-        self.R1  = data["R1"]
-        self.R2  = data["R2"]
-        self.Q   = data["Q"]
+        self.K1 = data["K1"]
+        self.D1 = data["D1"]
+        self.K2 = data["K2"]
+        self.D2 = data["D2"]
+        self.R = data["R"]
+        self.T = data["T"]
+        self.P1 = data["P1"]
+        self.P2 = data["P2"]
+        self.R1 = data["R1"]
+        self.R2 = data["R2"]
+        self.Q = data["Q"]
         self.img_size = tuple(data["img_size"])
 
         # Undistort + rectify maps (computed once)
@@ -55,7 +56,8 @@ class StereoTriangulator:
         ).reshape(-1, 2)
 
         pts4d = cv2.triangulatePoints(
-            self.P1, self.P2,
+            self.P1,
+            self.P2,
             pts0_ud.T.astype(np.float32),
             pts1_ud.T.astype(np.float32),
         )

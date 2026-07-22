@@ -46,7 +46,9 @@ import torch.nn as nn
 
 # This script lives in scripts/trt/; the repo root (which holds the sam_3d_body
 # package and checkpoints/) is two directories up.
-repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+repo_root = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 sys.path.insert(0, repo_root)
 
 
@@ -55,9 +57,13 @@ sys.path.insert(0, repo_root)
 _candidates = [
     os.environ.get("CHECKPOINT_DIR", ""),
     os.path.join(repo_root, "checkpoints", "sam-3d-body-dinov3"),
-    os.path.join(os.path.dirname(repo_root), "checkpoints", "sam-3d-body-dinov3"),
+    os.path.join(
+        os.path.dirname(repo_root), "checkpoints", "sam-3d-body-dinov3"
+    ),
 ]
-CHECKPOINT_DIR = next((c for c in _candidates if c and os.path.isdir(c)), _candidates[1])
+CHECKPOINT_DIR = next(
+    (c for c in _candidates if c and os.path.isdir(c)), _candidates[1]
+)
 TRT_OUTPUT_DIR = os.path.join(CHECKPOINT_DIR, "backbone_trt")
 ONNX_PATH = os.path.join(TRT_OUTPUT_DIR, "backbone_dinov3.onnx")
 TRT_PATH_BF16 = os.path.join(TRT_OUTPUT_DIR, "backbone_dinov3_bf16.engine")
@@ -76,6 +82,7 @@ class BackboneWrapper(nn.Module):
     Wrapper for DINOv3 backbone that exposes a simple forward interface.
     This wraps the get_intermediate_layers call for ONNX export.
     """
+
     def __init__(self, encoder):
         super().__init__()
         self.encoder = encoder
@@ -89,7 +96,9 @@ class BackboneWrapper(nn.Module):
         """
         # get_intermediate_layers returns a list of features
         # We take the last one with reshape=True, norm=True
-        y = self.encoder.get_intermediate_layers(x, n=1, reshape=True, norm=True)[-1]
+        y = self.encoder.get_intermediate_layers(
+            x, n=1, reshape=True, norm=True
+        )[-1]
         return y
 
 
@@ -132,7 +141,9 @@ def step1_export_onnx(backbone, batch_sizes=[1, 2, 4]):
     wrapper.cuda()
 
     # Test input (FP32)
-    dummy_input = torch.randn(1, 3, *IMAGE_SIZE, device="cuda", dtype=torch.float32)
+    dummy_input = torch.randn(
+        1, 3, *IMAGE_SIZE, device="cuda", dtype=torch.float32
+    )
 
     # Verify output
     with torch.no_grad():
@@ -144,10 +155,7 @@ def step1_export_onnx(backbone, batch_sizes=[1, 2, 4]):
     print("  Exporting to ONNX...")
 
     # Dynamic axes for batch dimension
-    dynamic_axes = {
-        "input": {0: "batch_size"},
-        "output": {0: "batch_size"}
-    }
+    dynamic_axes = {"input": {0: "batch_size"}, "output": {0: "batch_size"}}
 
     torch.onnx.export(
         wrapper,
@@ -166,6 +174,7 @@ def step1_export_onnx(backbone, batch_sizes=[1, 2, 4]):
     # Verify ONNX
     try:
         import onnx
+
         model = onnx.load(ONNX_PATH)
         onnx.checker.check_model(model)
         print("  ONNX model verified!")
@@ -192,7 +201,9 @@ def step2_convert_tensorrt(batch_sizes=[1, 2, 4]):
     builder = trt.Builder(logger)
     try:
         flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    except AttributeError:      # TRT >= 11: explicit batch is the only mode (flag removed)
+    except (
+        AttributeError
+    ):  # TRT >= 11: explicit batch is the only mode (flag removed)
         flags = 0
     network = builder.create_network(flags)
     parser = trt.OnnxParser(network, logger)
@@ -239,7 +250,11 @@ def step2_convert_tensorrt(batch_sizes=[1, 2, 4]):
 
     # Set min/opt/max shapes for batch dimension
     min_batch = min(batch_sizes)
-    opt_batch = batch_sizes[len(batch_sizes) // 2] if len(batch_sizes) > 1 else batch_sizes[0]
+    opt_batch = (
+        batch_sizes[len(batch_sizes) // 2]
+        if len(batch_sizes) > 1
+        else batch_sizes[0]
+    )
     max_batch = max(batch_sizes)
 
     profile.set_shape(
@@ -301,8 +316,12 @@ class TRTBackbone:
 
         # Allocate output buffer (FP16)
         output = torch.empty(
-            batch_size, EMBED_DIM, OUTPUT_SIZE[0], OUTPUT_SIZE[1],
-            device=x.device, dtype=torch.float16
+            batch_size,
+            EMBED_DIM,
+            OUTPUT_SIZE[0],
+            OUTPUT_SIZE[1],
+            device=x.device,
+            dtype=torch.float16,
         )
 
         # Set tensor addresses
@@ -327,7 +346,9 @@ def step3_benchmark(backbone):
         print(f"\n  Batch size: {batch_size}")
 
         # Test input
-        x = torch.randn(batch_size, 3, *IMAGE_SIZE, device="cuda", dtype=torch.float32)
+        x = torch.randn(
+            batch_size, 3, *IMAGE_SIZE, device="cuda", dtype=torch.float32
+        )
 
         # PyTorch (BF16)
         print("  [PyTorch BF16]")
@@ -380,12 +401,27 @@ def step3_benchmark(backbone):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert DINOv3 Backbone to TensorRT")
-    parser.add_argument("--export_onnx", action="store_true", help="Export to ONNX")
-    parser.add_argument("--convert_trt", action="store_true", help="Convert ONNX to TensorRT")
-    parser.add_argument("--benchmark", action="store_true", help="Benchmark PyTorch vs TensorRT")
+    parser = argparse.ArgumentParser(
+        description="Convert DINOv3 Backbone to TensorRT"
+    )
+    parser.add_argument(
+        "--export_onnx", action="store_true", help="Export to ONNX"
+    )
+    parser.add_argument(
+        "--convert_trt", action="store_true", help="Convert ONNX to TensorRT"
+    )
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="Benchmark PyTorch vs TensorRT",
+    )
     parser.add_argument("--all", action="store_true", help="Run all steps")
-    parser.add_argument("--batch_sizes", type=str, default="1,2,4", help="Batch sizes for optimization")
+    parser.add_argument(
+        "--batch_sizes",
+        type=str,
+        default="1,2,4",
+        help="Batch sizes for optimization",
+    )
 
     args = parser.parse_args()
 

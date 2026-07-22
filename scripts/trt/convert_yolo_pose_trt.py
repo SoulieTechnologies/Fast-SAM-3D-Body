@@ -10,9 +10,10 @@ Usage:
 import argparse
 import os
 
-
 # This script lives in scripts/trt/; checkpoints/ is at the repo root, two up.
-_repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_repo_root = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 CHECKPOINT_DIR = os.path.join(_repo_root, "checkpoints", "yolo")
 
 
@@ -50,6 +51,7 @@ def convert_to_tensorrt(model_name: str, imgsz: int = 640, half: bool = True):
     # Move engine to checkpoints/yolo/ if not already there
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     import shutil
+
     engine_name = os.path.basename(output_path)
     target_path = os.path.join(CHECKPOINT_DIR, engine_name)
     if os.path.abspath(output_path) != os.path.abspath(target_path):
@@ -62,7 +64,9 @@ def convert_to_tensorrt(model_name: str, imgsz: int = 640, half: bool = True):
     onnx_name = os.path.splitext(os.path.basename(model_name))[0] + ".onnx"
     onnx_source = os.path.join(source_dir, onnx_name)
     onnx_target = os.path.join(CHECKPOINT_DIR, onnx_name)
-    if os.path.exists(onnx_source) and os.path.abspath(onnx_source) != os.path.abspath(onnx_target):
+    if os.path.exists(onnx_source) and os.path.abspath(
+        onnx_source
+    ) != os.path.abspath(onnx_target):
         shutil.move(onnx_source, onnx_target)
         print(f"Moved ONNX to: {onnx_target}")
 
@@ -81,6 +85,7 @@ def test_engine(engine_path: str, test_image: str = None):
     # Create test image
     if test_image and os.path.exists(test_image):
         import cv2
+
         img = cv2.imread(test_image)
     else:
         print("Using random test image...")
@@ -97,36 +102,38 @@ def test_engine(engine_path: str, test_image: str = None):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Convert YOLO-Pose to TensorRT")
+    parser = argparse.ArgumentParser(
+        description="Convert YOLO-Pose to TensorRT"
+    )
     parser.add_argument(
         "--model",
         type=str,
         default="./checkpoints/yolo/yolo11m-pose.pt",
-        help="YOLO-Pose model name (e.g., yolo11n-pose.pt, yolo11m-pose.pt)"
+        help="YOLO-Pose model name (e.g., yolo11n-pose.pt, yolo11m-pose.pt)",
     )
     parser.add_argument(
         "--imgsz",
         type=int,
         default=640,
-        help="Input image size (default: 640)"
+        help="Input image size (default: 640)",
     )
     parser.add_argument(
         "--half",
         action="store_true",
         default=True,
-        help="Use FP16 (default: True)"
+        help="Use FP16 (default: True)",
     )
     parser.add_argument(
         "--no-half",
         action="store_false",
         dest="half",
-        help="Use FP32 instead of FP16"
+        help="Use FP32 instead of FP16",
     )
     parser.add_argument(
         "--test-image",
         type=str,
         default="./notebook/images/dancing.jpg",
-        help="Test image path (optional)"
+        help="Test image path (optional)",
     )
 
     args = parser.parse_args()

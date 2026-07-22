@@ -18,8 +18,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+
 # ───────────────────────── fake torch (numpy-backed) ─────────────────────────
-class FT:                                   # FakeTensor
+class FT:  # FakeTensor
     def __init__(self, a):
         self.a = np.asarray(a)
 
@@ -54,7 +55,8 @@ torch.float32 = "float32"
 torch.cuda = types.SimpleNamespace(synchronize=lambda: None)
 torch.backends = types.SimpleNamespace(
     cuda=types.SimpleNamespace(matmul=types.SimpleNamespace(allow_tf32=False)),
-    cudnn=types.SimpleNamespace(allow_tf32=False))
+    cudnn=types.SimpleNamespace(allow_tf32=False),
+)
 sys.modules["torch"] = torch
 
 # ─────────────────── stub the heavy imports of cosmik_hand_demo ───────────────
@@ -70,10 +72,10 @@ sys.modules["notebook"], sys.modules["notebook.utils"] = nb, nbu
 
 rd = types.ModuleType("rerun_demo")
 rd._H_WRIST = 20
-rd.HAND_SRC = list(range(21))               # identity keypoint mapping
+rd.HAND_SRC = list(range(21))  # identity keypoint mapping
 rd.L_ELBOW, rd.L_WRIST, rd.R_ELBOW, rd.R_WRIST = 7, 9, 8, 10
 rd._quiet = contextlib.nullcontext
-rd._hand_box_v2 = lambda k17, w, e, args: None      # replaced via _hand_box_view
+rd._hand_box_v2 = lambda k17, w, e, args: None  # replaced via _hand_box_view
 sys.modules["rerun_demo"] = rd
 
 s3 = types.ModuleType("sam_3d_body")
@@ -82,32 +84,39 @@ s3ma = types.ModuleType("sam_3d_body.models.meta_arch")
 s3mb = types.ModuleType("sam_3d_body.models.meta_arch.sam3d_body")
 
 
-def fake_prep(img, lbox, rbox, cam_int, output_size=(64, 64), padding=0.9,
-              device="cuda"):
+def fake_prep(
+    img, lbox, rbox, cam_int, output_size=(64, 64), padding=0.9, device="cuda"
+):
     """Batches shaped like the real _prepare_hand_batches_gpu: (1, N=1, ...);
     the img content encodes (box_x1) so tiles are traceable to their box."""
     oh, ow = output_size
 
     def batch(box):
-        return {"img": FT(np.full((1, 1, 3, oh, ow), box[0, 0] / 255.0)),
-                "img_size": FT(np.zeros((1, 1, 2))),
-                "ori_img_size": FT(np.zeros((1, 1, 2))),
-                "bbox_center": FT(np.zeros((1, 1, 2))),
-                "bbox_scale": FT(np.zeros((1, 1, 2))),
-                "bbox": FT(box[None]),
-                "affine_trans": FT(np.zeros((1, 1, 2, 3))),
-                "mask": FT(np.zeros((1, 1, 1, oh, ow))),
-                "mask_score": FT(np.zeros((1, 1))),
-                "person_valid": FT(np.ones((1, 1))),
-                "cam_int": FT(cam_int.a if isinstance(cam_int, FT) else cam_int)}
+        return {
+            "img": FT(np.full((1, 1, 3, oh, ow), box[0, 0] / 255.0)),
+            "img_size": FT(np.zeros((1, 1, 2))),
+            "ori_img_size": FT(np.zeros((1, 1, 2))),
+            "bbox_center": FT(np.zeros((1, 1, 2))),
+            "bbox_scale": FT(np.zeros((1, 1, 2))),
+            "bbox": FT(box[None]),
+            "affine_trans": FT(np.zeros((1, 1, 2, 3))),
+            "mask": FT(np.zeros((1, 1, 1, oh, ow))),
+            "mask_score": FT(np.zeros((1, 1))),
+            "person_valid": FT(np.ones((1, 1))),
+            "cam_int": FT(cam_int.a if isinstance(cam_int, FT) else cam_int),
+        }
+
     return batch(lbox), batch(rbox), lbox
 
 
 s3mb._prepare_hand_batches_gpu = fake_prep
 s3.models, s3m.meta_arch, s3ma.sam3d_body = s3m, s3ma, s3mb
-for n, m in (("sam_3d_body", s3), ("sam_3d_body.models", s3m),
-             ("sam_3d_body.models.meta_arch", s3ma),
-             ("sam_3d_body.models.meta_arch.sam3d_body", s3mb)):
+for n, m in (
+    ("sam_3d_body", s3),
+    ("sam_3d_body.models", s3m),
+    ("sam_3d_body.models.meta_arch", s3ma),
+    ("sam_3d_body.models.meta_arch.sam3d_body", s3mb),
+):
     sys.modules[n] = m
 
 import cosmik_hand_demo as chd
@@ -116,7 +125,10 @@ import cosmik_hand_demo as chd
 class FakeModel:
     """forward_step: entry i predicts all-21 keypoints at (100*i+7, 100*i+9),
     3D at z = i — so routing errors are unmissable."""
-    cfg = types.SimpleNamespace(MODEL=types.SimpleNamespace(IMAGE_SIZE=(64, 64)))
+
+    cfg = types.SimpleNamespace(
+        MODEL=types.SimpleNamespace(IMAGE_SIZE=(64, 64))
+    )
 
     def _initialize_batch(self, bh):
         self.B = bh["img"].shape[0]
@@ -130,8 +142,12 @@ class FakeModel:
         for i in range(B):
             p2[i] = [100 * i + 7, 100 * i + 9]
             p3[i, :, 2] = i
-        return {"mhr_hand": {"pred_keypoints_2d": FT(p2),
-                             "pred_keypoints_3d": FT(p3)}}
+        return {
+            "mhr_hand": {
+                "pred_keypoints_2d": FT(p2),
+                "pred_keypoints_3d": FT(p3),
+            }
+        }
 
     class _D(dict):
         pass
@@ -140,7 +156,7 @@ class FakeModel:
 # make the boxes deterministic: right box x1 = 10+view, left box x1 = 50+view
 def fake_box_view(k17, wrist_i, elbow_i, args, side_px=None):
     base = 10.0 if wrist_i == rd.R_WRIST else 50.0
-    v = k17[0, 0]                            # view id smuggled in k17[0]
+    v = k17[0, 0]  # view id smuggled in k17[0]
     return np.array([base + v, 0, base + v + 20, 20], np.float32)
 
 
@@ -154,8 +170,12 @@ def run_step(views, want):
     frames = {v: np.zeros((480, W, 3), np.uint8) for v in views}
     k17s = {v: np.full((17, 2), float(v), np.float32) for v in views}
     cam_ints = {v: FT(np.eye(3)[None] * (v + 1)) for v in views}
-    return chd._hand_decoder_step_views(FakeModel(), frames, k17s, cam_ints,
-                                        ARGS, sides=None, want=want), W
+    return (
+        chd._hand_decoder_step_views(
+            FakeModel(), frames, k17s, cam_ints, ARGS, sides=None, want=want
+        ),
+        W,
+    )
 
 
 def test_routing():
@@ -195,6 +215,7 @@ def test_no_want_all_views():
 def test_handworker_select():
     # 4-cam rig: front cams 0,1 see the palm flat; side cams 2,3 edge-on
     import tools.test_view_selection as rig
+
     Rs = [rig.CAMS[i][0] for i in range(4)]
     Ts = [rig.CAMS[i][1] for i in range(4)]
     Ks = [np.eye(3)] * 4
@@ -205,19 +226,25 @@ def test_handworker_select():
         kp3d[pair[0]] = kp3d[pair[1]] = val
     kp3d[chd.R_PALM[0]], kp3d[chd.R_PALM[1]] = thu, pin
     # left hand markers missing → neutral vis; give cam 2,3 bigger conf/size? no:
-    res = {"kp3d": kp3d,
-           "kp2d": np.full((4, chd.NMK, 2), 640.0, np.float32),
-           "scores": np.ones((4, chd.NMK), np.float32)}
-    hw = chd.HandWorker.__new__(chd.HandWorker)     # no thread init needed
+    res = {
+        "kp3d": kp3d,
+        "kp2d": np.full((4, chd.NMK, 2), 640.0, np.float32),
+        "scores": np.ones((4, chd.NMK), np.float32),
+    }
+    hw = chd.HandWorker.__new__(chd.HandWorker)  # no thread init needed
     hw.calib = (Ks, Ds, Rs, Ts)
-    hw.args = types.SimpleNamespace(cap_width=1280, cap_height=720,
-                                    hand_switch_bonus=1.15)
+    hw.args = types.SimpleNamespace(
+        cap_width=1280, cap_height=720, hand_switch_bonus=1.15
+    )
     hw.topk = 2
     hw._sel_prev = {"r": set(), "l": set()}
-    sides = {v: (150.0, 150.0) for v in range(4)}   # equal size everywhere
+    sides = {v: (150.0, 150.0) for v in range(4)}  # equal size everywhere
     want, order = hw._select(res, [0, 1, 2, 3], sides)
     r_sel = {v for v, (r, _) in want.items() if r}
-    assert r_sel == {0, 1}, f"front cams must win for the flat right hand: {order}"
+    assert r_sel == {
+        0,
+        1,
+    }, f"front cams must win for the flat right hand: {order}"
     assert hw._sel_prev["r"] == {0, 1}
     # palm rotated toward the LEFT side cam → cam 2 must enter the selection
     wri2, thu2, pin2 = rig.hand_markers([-1, 0, 0])
@@ -234,20 +261,22 @@ def test_handworker_select():
             kp2d[v, m] = (320.0, 240.0)
         for m in chd.R_ELBOW_PAIR:
             kp2d[v, m] = (320.0 + L, 240.0)
-    res2 = {"kp3d": np.full((chd.NMK, 3), np.nan, np.float32),
-            "kp2d": kp2d, "scores": np.ones((4, chd.NMK), np.float32)}
+    res2 = {
+        "kp3d": np.full((chd.NMK, 3), np.nan, np.float32),
+        "kp2d": kp2d,
+        "scores": np.ones((4, chd.NMK), np.float32),
+    }
     hw._sel_prev = {"r": set(), "l": set()}
     want, order = hw._select(res2, [0, 1, 2, 3], None)
     assert order["r"][0] == 2, f"2D forearm fallback must rank size: {order}"
     print("  HandWorker._select on the 4-cam rig ok")
 
 
-
-
 def test_handworker_run_once():
     """One full HandWorker.run() iteration end-to-end (fake cams/body/model):
     selection → flat decoder batch → per-hand sources → result dict."""
     import tools.test_view_selection as rig
+
     chd._STOP.clear()
     Rs = [rig.CAMS[i][0] for i in range(4)]
     Ts = [rig.CAMS[i][1] for i in range(4)]
@@ -256,9 +285,11 @@ def test_handworker_run_once():
     kp3d = np.full((chd.NMK, 3), np.nan, np.float32)
     kp3d[chd.R_WRIST_PAIR[0]] = kp3d[chd.R_WRIST_PAIR[1]] = wri
     kp3d[chd.R_PALM[0]], kp3d[chd.R_PALM[1]] = thu, pin
-    res = {"kp3d": kp3d,
-           "kp2d": np.full((4, chd.NMK, 2), 320.0, np.float32),
-           "scores": np.ones((4, chd.NMK), np.float32)}
+    res = {
+        "kp3d": kp3d,
+        "kp2d": np.full((4, chd.NMK, 2), 320.0, np.float32),
+        "scores": np.ones((4, chd.NMK), np.float32),
+    }
 
     class FakeCam:
         def latest(self):
@@ -274,28 +305,47 @@ def test_handworker_run_once():
             return res, 1
 
     args = types.SimpleNamespace(
-        hand_topk=-1, hand_switch_bonus=1.15, cap_width=640, cap_height=480,
-        hand_size_m=0, hand_size_frac=0, det_thr=0.3, hand_reproj_thr=15.0,
-        hand_res=64)
-    hw = chd.HandWorker([FakeCam()] * 4, FakeBody(), FakeModel(), calib,
-                        args, [0, 1, 2, 3], hand_cam=0)
+        hand_topk=-1,
+        hand_switch_bonus=1.15,
+        cap_width=640,
+        cap_height=480,
+        hand_size_m=0,
+        hand_size_frac=0,
+        det_thr=0.3,
+        hand_reproj_thr=15.0,
+        hand_res=64,
+    )
+    hw = chd.HandWorker(
+        [FakeCam()] * 4,
+        FakeBody(),
+        FakeModel(),
+        calib,
+        args,
+        [0, 1, 2, 3],
+        hand_cam=0,
+    )
     assert hw.topk == 2, "auto topk on 4 views"
-    hw.run()                                    # exits via _STOP
+    hw.run()  # exits via _STOP
     chd._STOP.clear()
     r = hw.result
     assert r is not None and hw.n == 1
     assert len(r["sel"]["r"]) == 2 and len(r["sel"]["l"]) == 2
-    assert set(r["sel"]["r"]) == {0, 1}, f"flat right hand → front cams: {r['sel']}"
+    assert set(r["sel"]["r"]) == {
+        0,
+        1,
+    }, f"flat right hand → front cams: {r['sel']}"
     assert r["src_r"] in r["sel"]["r"] and r["src_l"] in r["sel"]["l"]
     assert r["kp_r"] is not None and r["kp_l"] is not None
     # kp2d_views populated exactly on the selected (view, hand) slots
-    got_r = set(np.flatnonzero(np.isfinite(r["kp2d_views"][:, :21]).all((1, 2))))
-    got_l = set(np.flatnonzero(np.isfinite(r["kp2d_views"][:, 21:]).all((1, 2))))
+    got_r = set(
+        np.flatnonzero(np.isfinite(r["kp2d_views"][:, :21]).all((1, 2)))
+    )
+    got_l = set(
+        np.flatnonzero(np.isfinite(r["kp2d_views"][:, 21:]).all((1, 2)))
+    )
     assert got_r == set(r["sel"]["r"]) and got_l == set(r["sel"]["l"])
     assert r["X_r"].shape == (21, 3) and "tri_ms" in r["tms"]
     print("  HandWorker.run() one iteration ok")
-
-
 
 
 def test_selection_dynamics():
@@ -303,6 +353,7 @@ def test_selection_dynamics():
     over 120 simulated body frames: the right hand's selection must migrate
     to include cam 2, with few switches (hysteresis, no flapping)."""
     import tools.test_view_selection as rig
+
     chd._STOP.clear()
     Rs = [rig.CAMS[i][0] for i in range(4)]
     Ts = [rig.CAMS[i][1] for i in range(4)]
@@ -316,9 +367,13 @@ def test_selection_dynamics():
         kp3d = np.full((chd.NMK, 3), np.nan, np.float32)
         kp3d[chd.R_WRIST_PAIR[0]] = kp3d[chd.R_WRIST_PAIR[1]] = wri
         kp3d[chd.R_PALM[0]], kp3d[chd.R_PALM[1]] = thu, pin
-        seq.append({"kp3d": kp3d,
-                    "kp2d": np.full((4, chd.NMK, 2), 320.0, np.float32),
-                    "scores": np.ones((4, chd.NMK), np.float32)})
+        seq.append(
+            {
+                "kp3d": kp3d,
+                "kp2d": np.full((4, chd.NMK, 2), 320.0, np.float32),
+                "scores": np.ones((4, chd.NMK), np.float32),
+            }
+        )
 
     class FakeCam:
         def latest(self):
@@ -345,18 +400,34 @@ def test_selection_dynamics():
     chd.HandWorker._select = rec
     try:
         args = types.SimpleNamespace(
-            hand_topk=-1, hand_switch_bonus=1.15, cap_width=640,
-            cap_height=480, hand_size_m=0, hand_size_frac=0, det_thr=0.3,
-            hand_reproj_thr=15.0, hand_res=64)
-        hw = chd.HandWorker([FakeCam()] * 4, FakeBody(), FakeModel(), calib,
-                            args, [0, 1, 2, 3], hand_cam=0)
+            hand_topk=-1,
+            hand_switch_bonus=1.15,
+            cap_width=640,
+            cap_height=480,
+            hand_size_m=0,
+            hand_size_frac=0,
+            det_thr=0.3,
+            hand_reproj_thr=15.0,
+            hand_res=64,
+        )
+        hw = chd.HandWorker(
+            [FakeCam()] * 4,
+            FakeBody(),
+            FakeModel(),
+            calib,
+            args,
+            [0, 1, 2, 3],
+            hand_cam=0,
+        )
         hw.run()
     finally:
         chd.HandWorker._select = orig
         chd._STOP.clear()
     assert len(sels) == N
     assert sels[0] == (0, 1), f"front phase must use the front cams: {sels[0]}"
-    assert 2 in sels[-1], f"left side cam must join after the rotation: {sels[-1]}"
+    assert (
+        2 in sels[-1]
+    ), f"left side cam must join after the rotation: {sels[-1]}"
     switches = sum(a != b for a, b in zip(sels, sels[1:]))
     assert 1 <= switches <= 4, f"selection flaps: {switches} switches"
     print(f"  selection dynamics ok (final {sels[-1]}, {switches} switch(es))")

@@ -30,6 +30,7 @@ Controls:
     q    — quit
 Then:  python calibrate_multi.py --cams 0,2,4,6
 """
+
 import argparse
 import glob
 import os
@@ -40,35 +41,56 @@ import numpy as np
 import board_config
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--cams", default="0,1,2,3",
-                help="comma-separated camera indices OR /dev/v4l/by-id paths "
-                     "(stable across reboots — recommended with 4 identical "
-                     "cams); first = reference. A path is labelled/saved by "
-                     "its POSITION (images/cam{pos})")
+ap.add_argument(
+    "--cams",
+    default="0,1,2,3",
+    help="comma-separated camera indices OR /dev/v4l/by-id paths "
+    "(stable across reboots — recommended with 4 identical "
+    "cams); first = reference. A path is labelled/saved by "
+    "its POSITION (images/cam{pos})",
+)
 ap.add_argument("--min_corners", type=int, default=6)
 ap.add_argument("--width", type=int, default=1920)
 ap.add_argument("--height", type=int, default=1080)
 ap.add_argument("--auto-exposure", action="store_true")
-ap.add_argument("--lock-focus", action="store_true",
-                help="disable autofocus on every camera (no-op on fixed-focus "
-                     "models). REQUIRED with an autofocus camera: refocusing "
-                     "shifts the effective focal length. The demo must then "
-                     "run with the same --lock-focus/--focus")
-ap.add_argument("--focus", type=float, default=None,
-                help="fixed manual focus (V4L2 units, typically 0-255; "
-                     "implies --lock-focus). Pick it with the sharpness "
-                     "readout: corners N/88 + sharp value on the board")
+ap.add_argument(
+    "--lock-focus",
+    action="store_true",
+    help="disable autofocus on every camera (no-op on fixed-focus "
+    "models). REQUIRED with an autofocus camera: refocusing "
+    "shifts the effective focal length. The demo must then "
+    "run with the same --lock-focus/--focus",
+)
+ap.add_argument(
+    "--focus",
+    type=float,
+    default=None,
+    help="fixed manual focus (V4L2 units, typically 0-255; "
+    "implies --lock-focus). Pick it with the sharpness "
+    "readout: corners N/88 + sharp value on the board",
+)
 ap.add_argument("--exposure", type=float, default=None)
 ap.add_argument("--gain", type=float, default=None)
-ap.add_argument("--display-width", type=int, default=1700,
-                help="max preview mosaic width (px); the window is also "
-                     "freely resizable with the mouse")
-ap.add_argument("--display-height", type=int, default=900,
-                help="max preview mosaic height (px) — lower it if the "
-                     "bottom row is cut off by the taskbar")
-ap.add_argument("--rotate180", action="store_true",
-                help="rotate every frame 180 (upside-down mount); the demo MUST "
-                     "then run with the same flag")
+ap.add_argument(
+    "--display-width",
+    type=int,
+    default=1700,
+    help="max preview mosaic width (px); the window is also "
+    "freely resizable with the mouse",
+)
+ap.add_argument(
+    "--display-height",
+    type=int,
+    default=900,
+    help="max preview mosaic height (px) — lower it if the "
+    "bottom row is cut off by the taskbar",
+)
+ap.add_argument(
+    "--rotate180",
+    action="store_true",
+    help="rotate every frame 180 (upside-down mount); the demo MUST "
+    "then run with the same flag",
+)
 args = ap.parse_args()
 
 # int token = device index (label = itself, unchanged); path token = opened
@@ -109,12 +131,17 @@ for c in cam_ids:
             cap.set(cv2.CAP_PROP_FOCUS, args.focus)
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f"cam{c}: {w}x{h} auto_exp={cap.get(cv2.CAP_PROP_AUTO_EXPOSURE):g} "
-          f"exposure={cap.get(cv2.CAP_PROP_EXPOSURE):g} "
-          f"gain={cap.get(cv2.CAP_PROP_GAIN):g}"
-          + (f" focus={cap.get(cv2.CAP_PROP_FOCUS):g}"
-             f" af={cap.get(cv2.CAP_PROP_AUTOFOCUS):g}"
-             if (args.lock_focus or args.focus is not None) else ""))
+    print(
+        f"cam{c}: {w}x{h} auto_exp={cap.get(cv2.CAP_PROP_AUTO_EXPOSURE):g} "
+        f"exposure={cap.get(cv2.CAP_PROP_EXPOSURE):g} "
+        f"gain={cap.get(cv2.CAP_PROP_GAIN):g}"
+        + (
+            f" focus={cap.get(cv2.CAP_PROP_FOCUS):g}"
+            f" af={cap.get(cv2.CAP_PROP_AUTOFOCUS):g}"
+            if (args.lock_focus or args.focus is not None)
+            else ""
+        )
+    )
     if w != args.width:
         print(f"  WARNING: cam{c} refused {args.width}x{args.height}")
     caps.append(cap)
@@ -122,14 +149,20 @@ for c in cam_ids:
 # resume numbering after any existing capture: sets ADD to the pool (drop
 # a bad zone by deleting its frame range; calibrate_multi pairs by filename)
 _existing = glob.glob("images/cam*/frame_*.png")
-count = 1 + max((int(os.path.basename(f)[6:10]) for f in _existing),
-                default=-1)
+count = 1 + max(
+    (int(os.path.basename(f)[6:10]) for f in _existing), default=-1
+)
 if count:
     print(f"resuming at set {count} ({len(_existing)} existing images kept)")
 sharp_peak = [0.0] * len(cam_ids)
-cur_exp = args.exposure if args.exposure is not None \
+cur_exp = (
+    args.exposure
+    if args.exposure is not None
     else max(caps[0].get(cv2.CAP_PROP_EXPOSURE), 1.0)
-cur_gain = args.gain if args.gain is not None else caps[0].get(cv2.CAP_PROP_GAIN)
+)
+cur_gain = (
+    args.gain if args.gain is not None else caps[0].get(cv2.CAP_PROP_GAIN)
+)
 manual_exp = args.exposure is not None
 
 
@@ -168,7 +201,8 @@ def sharpness(gray, pts):
 def overlay(idx, frame, gray):
     disp = frame.copy()
     ch, ids, mk, mkids = board_config.detect_charuco(
-        gray, board, dictionary, min_corners=args.min_corners)
+        gray, board, dictionary, min_corners=args.min_corners
+    )
     if mkids is not None and len(mkids):
         cv2.aruco.drawDetectedMarkers(disp, mk, mkids)
     pts = None
@@ -179,20 +213,40 @@ def overlay(idx, frame, gray):
     s = sharpness(gray, pts)
     sharp_peak[idx] = max(sharp_peak[idx], s)
     near = s >= 0.9 * sharp_peak[idx] and sharp_peak[idx] > 0
-    cv2.putText(disp, f"sharp {s:.0f} (peak {sharp_peak[idx]:.0f})", (10, 90),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                (0, 255, 0) if near else (0, 165, 255), 2)
+    cv2.putText(
+        disp,
+        f"sharp {s:.0f} (peak {sharp_peak[idx]:.0f})",
+        (10, 90),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 255, 0) if near else (0, 165, 255),
+        2,
+    )
     ok = ch is not None
     cmap = {}
     if ok:
         cmap = {int(ids[k]): ch[k].reshape(2) for k in range(len(ids))}
         for pt in ch.reshape(-1, 2):
             cv2.circle(disp, tuple(pt.astype(int)), 4, (0, 255, 0), -1)
-        cv2.putText(disp, f"cam{cam_labs[idx]}  corners {len(ch)}/{N_CORNERS}",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(
+            disp,
+            f"cam{cam_labs[idx]}  corners {len(ch)}/{N_CORNERS}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 255, 0),
+            2,
+        )
     else:
-        cv2.putText(disp, f"cam{cam_labs[idx]}  no board", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        cv2.putText(
+            disp,
+            f"cam{cam_labs[idx]}  no board",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 255),
+            2,
+        )
     return disp, ok, cmap
 
 
@@ -203,11 +257,15 @@ def grid(images):
     rows = int(np.ceil(n / cols))
     blank = np.zeros_like(images[0])
     cells = images + [blank] * (rows * cols - n)
-    mosaic = cv2.vconcat([cv2.hconcat(cells[r * cols:(r + 1) * cols])
-                          for r in range(rows)])
+    mosaic = cv2.vconcat(
+        [cv2.hconcat(cells[r * cols : (r + 1) * cols]) for r in range(rows)]
+    )
     # fit BOTH dimensions on screen (4x1080p in 2x2 is 3840x2160 raw)
-    s = min(1.0, args.display_width / mosaic.shape[1],
-            args.display_height / mosaic.shape[0])
+    s = min(
+        1.0,
+        args.display_width / mosaic.shape[1],
+        args.display_height / mosaic.shape[0],
+    )
     if s < 1.0:
         mosaic = cv2.resize(mosaic, None, fx=s, fy=s)
     return mosaic
@@ -218,11 +276,13 @@ WIN = "Multi-cam calibration  [s=save q=quit]"
 cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
 _win_sized = False
 
-MOVE_TOL_PX = 4.0     # max corner motion since the previous preview frame
+MOVE_TOL_PX = 4.0  # max corner motion since the previous preview frame
 prev_corners = [{} for _ in caps]
 
-print("Press 's' to save a frame set, 'q' to quit (hold the board STILL "
-      "when saving — the cameras are only soft-synced).")
+print(
+    "Press 's' to save a frame set, 'q' to quit (hold the board STILL "
+    "when saving — the cameras are only soft-synced)."
+)
 while True:
     # grab all cameras first (fast buffer dequeue, ~ms apart), THEN decode:
     # sequential read() would stagger the actual capture instants
@@ -233,66 +293,98 @@ while True:
     if not all(r[0] for r in reads):
         print("camera retrieve failed")
         break
-    frames = [cv2.rotate(f, cv2.ROTATE_180) if args.rotate180 else f
-              for _, f in reads]
+    frames = [
+        cv2.rotate(f, cv2.ROTATE_180) if args.rotate180 else f
+        for _, f in reads
+    ]
     grays = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in frames]
-    disps, oks, cmaps = zip(*[overlay(i, frames[i], grays[i])
-                              for i in range(len(caps))])
+    disps, oks, cmaps = zip(
+        *[overlay(i, frames[i], grays[i]) for i in range(len(caps))]
+    )
     disps = list(disps)
     # board motion per cam = mean corner displacement vs previous iteration
     motion = []
     for i, cm in enumerate(cmaps):
         common = set(cm) & set(prev_corners[i])
-        motion.append(float(np.mean([np.linalg.norm(cm[k] - prev_corners[i][k])
-                                     for k in common])) if common else None)
+        motion.append(
+            float(
+                np.mean(
+                    [
+                        np.linalg.norm(cm[k] - prev_corners[i][k])
+                        for k in common
+                    ]
+                )
+            )
+            if common
+            else None
+        )
         prev_corners[i] = cm
 
-    exp_txt = (f"exp {cur_exp:.0f} gain {cur_gain:.0f}" if manual_exp
-               else "exp auto")
+    exp_txt = (
+        f"exp {cur_exp:.0f} gain {cur_gain:.0f}" if manual_exp else "exp auto"
+    )
     n_ok = sum(oks)
     for d in disps:
-        cv2.putText(d, f"saved {count}  seen {n_ok}/{len(caps)}  {exp_txt}",
-                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        cv2.putText(
+            d,
+            f"saved {count}  seen {n_ok}/{len(caps)}  {exp_txt}",
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 0),
+            2,
+        )
     mosaic = grid(disps)
-    if not _win_sized:                    # start at the fitted size once
+    if not _win_sized:  # start at the fitted size once
         cv2.resizeWindow(WIN, mosaic.shape[1], mosaic.shape[0])
         _win_sized = True
     cv2.imshow(WIN, mosaic)
 
     key = cv2.waitKey(1) & 0xFF
-    if key == ord('q'):
+    if key == ord("q"):
         break
-    if key in (ord('+'), ord('=')):
+    if key in (ord("+"), ord("=")):
         set_exposure(exp=min(cur_exp * 1.4, 5000))
-    if key == ord('-'):
+    if key == ord("-"):
         set_exposure(exp=max(cur_exp / 1.4, 1.0))
-    if key == ord(']'):
+    if key == ord("]"):
         set_exposure(gain=min((cur_gain or 0) + 10, 255))
-    if key == ord('['):
+    if key == ord("["):
         set_exposure(gain=max((cur_gain or 0) - 10, 0))
-    if key == ord('a'):
+    if key == ord("a"):
         set_exposure(auto=True)
-    if key == ord('s'):
-        moving = [f"cam{cam_labs[i]} {m:.0f}px" for i, m in enumerate(motion)
-                  if oks[i] and m is not None and m > MOVE_TOL_PX]
+    if key == ord("s"):
+        moving = [
+            f"cam{cam_labs[i]} {m:.0f}px"
+            for i, m in enumerate(motion)
+            if oks[i] and m is not None and m > MOVE_TOL_PX
+        ]
         # any pair is useful: calibrate_multi chains pairwise links to cam0
         if moving:
-            print(f"not saved — board MOVING ({', '.join(moving)}): the "
-                  f"cameras are not hardware-synced, hold it still")
+            print(
+                f"not saved — board MOVING ({', '.join(moving)}): the "
+                f"cameras are not hardware-synced, hold it still"
+            )
         elif n_ok >= 2:
             saved = []
             for i, c in enumerate(cam_labs):
                 if oks[i]:
-                    cv2.imwrite(f"images/cam{c}/frame_{count:04d}.png", frames[i])
+                    cv2.imwrite(
+                        f"images/cam{c}/frame_{count:04d}.png", frames[i]
+                    )
                     saved.append(c)
             print(f"saved set {count}: cams {saved}")
             count += 1
         else:
-            print(f"not saved — >=2 cameras must see the board "
-                  f"(total seen={n_ok})")
+            print(
+                f"not saved — >=2 cameras must see the board "
+                f"(total seen={n_ok})"
+            )
 
 for cap in caps:
     cap.release()
 cv2.destroyAllWindows()
-print(f"Done. {count} frame sets saved. Next: python calibrate_multi.py "
-      f"--cams {args.cams}")
+print(
+    f"Done. {count} frame sets saved. Next: python calibrate_multi.py "
+    f"--cams {args.cams}"
+)

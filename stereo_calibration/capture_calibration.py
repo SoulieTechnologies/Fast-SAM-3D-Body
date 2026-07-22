@@ -29,6 +29,7 @@ Controls:
     a    — back to auto exposure on BOTH cameras
     q    — quit
 """
+
 import argparse
 import os
 import cv2
@@ -38,24 +39,46 @@ import board_config
 parser = argparse.ArgumentParser()
 parser.add_argument("--cam0", type=int, default=0)
 parser.add_argument("--cam1", type=int, default=2)
-parser.add_argument("--min_corners", type=int, default=6,
-                    help="Minimum ChArUco corners required to accept a frame")
-parser.add_argument("--width", type=int, default=1920,
-                    help="capture width — MUST match the resolution the demo runs at "
-                         "(intrinsics are resolution-dependent)")
+parser.add_argument(
+    "--min_corners",
+    type=int,
+    default=6,
+    help="Minimum ChArUco corners required to accept a frame",
+)
+parser.add_argument(
+    "--width",
+    type=int,
+    default=1920,
+    help="capture width — MUST match the resolution the demo runs at "
+    "(intrinsics are resolution-dependent)",
+)
 parser.add_argument("--height", type=int, default=1080)
-parser.add_argument("--auto-exposure", action="store_true",
-                    help="force auto exposure on BOTH cameras (fixes one-dark-"
-                         "one-bright when a camera kept manual settings)")
-parser.add_argument("--exposure", type=float, default=None,
-                    help="manual exposure for BOTH cameras (V4L2 units, "
-                         "typically 3..2047; overrides --auto-exposure)")
-parser.add_argument("--gain", type=float, default=None,
-                    help="manual gain for BOTH cameras (with --exposure)")
-parser.add_argument("--rotate180", action="store_true",
-                    help="Rotate both camera frames 180° (upside-down mounted "
-                         "cameras). Lossless. The demo MUST then run with the "
-                         "same flag (intrinsics are for the rotated image).")
+parser.add_argument(
+    "--auto-exposure",
+    action="store_true",
+    help="force auto exposure on BOTH cameras (fixes one-dark-"
+    "one-bright when a camera kept manual settings)",
+)
+parser.add_argument(
+    "--exposure",
+    type=float,
+    default=None,
+    help="manual exposure for BOTH cameras (V4L2 units, "
+    "typically 3..2047; overrides --auto-exposure)",
+)
+parser.add_argument(
+    "--gain",
+    type=float,
+    default=None,
+    help="manual gain for BOTH cameras (with --exposure)",
+)
+parser.add_argument(
+    "--rotate180",
+    action="store_true",
+    help="Rotate both camera frames 180° (upside-down mounted "
+    "cameras). Lossless. The demo MUST then run with the "
+    "same flag (intrinsics are for the rotated image).",
+)
 args = parser.parse_args()
 
 board, dictionary = board_config.make_board()
@@ -70,7 +93,9 @@ assert cap0.isOpened(), f"Cannot open camera {args.cam0}"
 assert cap1.isOpened(), f"Cannot open camera {args.cam1}"
 
 for i, cap in enumerate((cap0, cap1)):
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))  # USB bandwidth
+    cap.set(
+        cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG")
+    )  # USB bandwidth
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
 
@@ -82,25 +107,33 @@ for i, cap in enumerate((cap0, cap1)):
     elif args.auto_exposure:
         cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)  # V4L2: 3 = auto
 
-    print(f"cam{i}: {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
-          f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}  "
-          f"auto_exp={cap.get(cv2.CAP_PROP_AUTO_EXPOSURE):g} "
-          f"exposure={cap.get(cv2.CAP_PROP_EXPOSURE):g} "
-          f"gain={cap.get(cv2.CAP_PROP_GAIN):g} "
-          f"brightness={cap.get(cv2.CAP_PROP_BRIGHTNESS):g}")
+    print(
+        f"cam{i}: {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
+        f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}  "
+        f"auto_exp={cap.get(cv2.CAP_PROP_AUTO_EXPOSURE):g} "
+        f"exposure={cap.get(cv2.CAP_PROP_EXPOSURE):g} "
+        f"gain={cap.get(cv2.CAP_PROP_GAIN):g} "
+        f"brightness={cap.get(cv2.CAP_PROP_BRIGHTNESS):g}"
+    )
 
-if (cap0.get(cv2.CAP_PROP_FRAME_WIDTH) != args.width or
-        cap1.get(cv2.CAP_PROP_FRAME_WIDTH) != args.width):
-    print(f"WARNING: a camera refused {args.width}x{args.height} — the demo "
-          f"must then run at the resolution shown above.")
+if (
+    cap0.get(cv2.CAP_PROP_FRAME_WIDTH) != args.width
+    or cap1.get(cv2.CAP_PROP_FRAME_WIDTH) != args.width
+):
+    print(
+        f"WARNING: a camera refused {args.width}x{args.height} — the demo "
+        f"must then run at the resolution shown above."
+    )
 
 count = 0
 sharp_peak = [0.0, 0.0]
 
-cur_exp = args.exposure if args.exposure is not None \
+cur_exp = (
+    args.exposure
+    if args.exposure is not None
     else max(cap0.get(cv2.CAP_PROP_EXPOSURE), 1.0)
-cur_gain = args.gain if args.gain is not None \
-    else cap0.get(cv2.CAP_PROP_GAIN)
+)
+cur_gain = args.gain if args.gain is not None else cap0.get(cv2.CAP_PROP_GAIN)
 manual_exp = args.exposure is not None
 
 
@@ -143,7 +176,8 @@ def sharpness(gray, pts):
 def draw_overlay(idx, frame, gray):
     display = frame.copy()
     ch_corners, ch_ids, mk_corners, mk_ids = board_config.detect_charuco(
-        gray, board, dictionary, min_corners=args.min_corners)
+        gray, board, dictionary, min_corners=args.min_corners
+    )
     if mk_ids is not None and len(mk_ids):
         cv2.aruco.drawDetectedMarkers(display, mk_corners, mk_ids)
 
@@ -156,20 +190,39 @@ def draw_overlay(idx, frame, gray):
     sharp = sharpness(gray, pts)
     sharp_peak[idx] = max(sharp_peak[idx], sharp)
     near_peak = sharp >= 0.9 * sharp_peak[idx] and sharp_peak[idx] > 0
-    cv2.putText(display,
-                f"sharp: {sharp:5.0f}  (peak {sharp_peak[idx]:.0f})",
-                (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                (0, 255, 0) if near_peak else (0, 165, 255), 2)
+    cv2.putText(
+        display,
+        f"sharp: {sharp:5.0f}  (peak {sharp_peak[idx]:.0f})",
+        (10, 90),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 255, 0) if near_peak else (0, 165, 255),
+        2,
+    )
 
     ok = ch_corners is not None
     if ok:
         for pt in ch_corners.reshape(-1, 2):
             cv2.circle(display, tuple(pt.astype(int)), 4, (0, 255, 0), -1)
-        cv2.putText(display, f"corners: {len(ch_corners)}/{N_CORNERS}",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(
+            display,
+            f"corners: {len(ch_corners)}/{N_CORNERS}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 255, 0),
+            2,
+        )
     else:
-        cv2.putText(display, "no board", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        cv2.putText(
+            display,
+            "no board",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 255),
+            2,
+        )
     return display, ok
 
 
@@ -190,11 +243,19 @@ while True:
     disp0, ok0 = draw_overlay(0, frame0, gray0)
     disp1, ok1 = draw_overlay(1, frame1, gray1)
 
-    exp_txt = (f"exp {cur_exp:.0f} gain {cur_gain:.0f}" if manual_exp
-               else "exp auto")
+    exp_txt = (
+        f"exp {cur_exp:.0f} gain {cur_gain:.0f}" if manual_exp else "exp auto"
+    )
     for disp in (disp0, disp1):
-        cv2.putText(disp, f"saved: {count}   {exp_txt}", (10, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        cv2.putText(
+            disp,
+            f"saved: {count}   {exp_txt}",
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 0),
+            2,
+        )
 
     combined = cv2.hconcat([disp0, disp1])
     if combined.shape[1] > 2600:  # 2x1080p doesn't fit on screen
@@ -202,19 +263,19 @@ while True:
     cv2.imshow("Stereo Calibration Capture  [s=save  q=quit]", combined)
 
     key = cv2.waitKey(1) & 0xFF
-    if key == ord('q'):
+    if key == ord("q"):
         break
-    if key in (ord('+'), ord('=')):
+    if key in (ord("+"), ord("=")):
         set_exposure(exp=min(cur_exp * 1.4, 5000))
-    if key == ord('-'):
+    if key == ord("-"):
         set_exposure(exp=max(cur_exp / 1.4, 1.0))
-    if key == ord(']'):
+    if key == ord("]"):
         set_exposure(gain=min((cur_gain or 0) + 10, 255))
-    if key == ord('['):
+    if key == ord("["):
         set_exposure(gain=max((cur_gain or 0) - 10, 0))
-    if key == ord('a'):
+    if key == ord("a"):
         set_exposure(auto=True)
-    if key == ord('s'):
+    if key == ord("s"):
         if ok0 and ok1:
             cv2.imwrite(f"images/cam0/frame_{count:04d}.png", frame0)
             cv2.imwrite(f"images/cam1/frame_{count:04d}.png", frame1)
