@@ -1,0 +1,21 @@
+# SOMA labelling (run) config — HAND layout. Overlays soma_run_conf.yaml.
+# Fill ??? at runtime, then drive via soma.tools.soma_processor (see
+# src/tutorials/run_soma_on_soma_dataset.ipynb).
+
+mocap:
+  fname: ???            # $WORK/mocap/clear_hands/gabin/take_gabin_1.c3d
+  unit: m               # our Motive export is METRES (SOMA default is mm)
+  rotate:               # set if the take needs a world rotation to match SMPL-X
+  start_fidx: 0
+  end_fidx: -1
+  ds_rate: 1
+
+soma:
+  expr_id: ???          # the training experiment id
+  tracklet_labeling:
+    enable: True        # Motive gives short tracklets -> stabler labels
+
+save_c3d: True          # write a labelled c3d (input to soma_labeled_to_angles.py)
+keep_nan_points: True
+remove_zero_trajectories: False
+batch_size: 512

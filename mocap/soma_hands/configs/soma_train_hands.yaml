@@ -1,0 +1,56 @@
+# SOMA training config — HAND marker layout (21 dorsal markers/hand).
+# Overrides support_data/conf/soma_train_conf.yaml. Fill the ??? at runtime:
+#   from soma.train.soma_trainer import train_soma_once  (see RUNBOOK.md)
+#
+# READ THIS FIRST — the finger-animation caveat:
+#   Open-source SOMA hard-raises NotImplementedError when animate_hand=true
+#   (src/soma/data/synthetic_body_dataset.py, sample_hand_sequences.py all
+#   stubbed). So we CANNOT ask the released trainer to articulate fingers.
+#   Two strategies, both keep animate_hand=false here:
+#     A (default, runs now): train on flat-hand AMASS bodies with our markers on
+#        the hand vertices. Marker-layout augmentation + AMASS noise give the
+#        model variation; finger flexion at capture time is out-of-distribution
+#        but the wrist/MCP frame is rigid, so labels are usually still separable.
+#     C (quality, needs our patch): implement the hand sampler from GRAB and set
+#        animate_hand=true — see patches/enable_hand_animation.md. Only then does
+#        this flag do anything.
+
+surface_model:
+  type: smplx
+  gender: neutral
+
+data_parms:
+  amass_splits:
+    vald:
+      - HumanEva
+      - ACCAD
+    train:
+      - CMU
+      - PosePrior
+      - Transitions
+      # - GRAB          # add ONLY with the Strategy-C patch (real finger poses)
+  body_dataset:
+    rnd_zrot: true
+    animate_face: false
+    animate_hand: false   # MUST stay false on stock SOMA (see note above)
+    num_hand_var_perseq: 15
+  marker_dataset:
+    # our hand layout, produced by build_hand_superset.py:
+    superset_fname: ${dirs.marker_dataset_dir}/superset.json
+    use_synt_data_for:
+      - train
+      - vald
+    wrist_markers_on_stick: false
+    # markers are small & densely packed on the hand -> many layout variants help
+    num_marker_layout_augmentation: 8
+    num_random_vid_ring: 3
+    enable_rnd_vid_on_face_hands: false   # true only with Strategy-C
+  mocap_dataset:
+    num_occ_max: 5        # our takes have constant dropouts -> train with occ
+    num_ghost_max: 3      # bracelet reflections -> train with ghosts
+    limit_real_data: 0
+    limit_synt_data: 100
+
+train_parms:
+  batch_size: 256         # small markerset -> fits easily; raise if GPU allows
+  num_workers: 5
