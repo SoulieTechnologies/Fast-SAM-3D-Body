@@ -55,6 +55,14 @@ Run:
       --cap-width 1920 --cap-height 1080 --rerun-mode web
   # MONO mode (no calib yet): markers 2D + hand-decoder fingers, no metric body 3D
   python cosmik_hand_demo.py --cams 0 --fx 540 --rerun-mode native
+
+OFFLINE (record now, infer later) — same inference, every frame, no drop-old:
+  # 1. record all 4 cams synchronized (stereo_calibration/record_multi.py)
+  # 2. replay the SAME recording for the 4-cam body and the 2-cam hands:
+  python cosmik_hand_demo.py --cams 0,1,2,3 --calib multi_params.npz \
+      --cap-width 1920 --cap-height 1080 --replay recordings/take_01
+  python cosmik_hand_demo.py --cams 0,1 --calib stereo_params.npz \
+      --cap-width 1920 --cap-height 1080 --replay recordings/take_01
 """
 
 import os
@@ -381,7 +389,6 @@ class BodyWorker(threading.Thread):
         self._lock = threading.Lock()
 
     def run(self):
-        Ks, Ds, Rs, Ts = self.calib
         ncam = len(self.cams)
         last_ns = [-1] * ncam
         while not _STOP.is_set():
@@ -397,53 +404,62 @@ class BodyWorker(threading.Thread):
                 time.sleep(0.002)
                 continue
             last_ns = ns
-            W, H = self.size
-            for f in frames:
-                if f.shape[1] != W or f.shape[0] != H:
-                    # hard error: silently resizing would break the calibration
-                    # (K is for the capture resolution) → garbage triangulation
-                    raise SystemExit(
-                        f"camera frame is {f.shape[1]}x{f.shape[0]}, expected "
-                        f"{W}x{H} (--cap-width/height must match the calib)")
-            t0 = time.perf_counter()
-            out, tms, _, boxes = self.est.estimate_from_frames(frames)
-            # locked person box per cam, xywh pixels (NaN when no detection)
-            pboxes = np.full((ncam, 4), np.nan, np.float32)
-            for i, b in enumerate(boxes):
-                if b is not None and len(b):
-                    pboxes[i] = b[0].detach().float().cpu().numpy()
-            kp2d = np.full((ncam, NMK, 2), np.nan, np.float32)
-            sc = np.zeros((ncam, NMK), np.float32)
-            p2d_all = out["poses2d"]
-            unc_all = out.get("uncertainties") if hasattr(out, "get") else None
-            for i in range(ncam):
-                p = p2d_all[i]
-                if p is None or len(p) == 0 or p[0] is None:
-                    continue                      # no (locked) person in this view
-                kp2d[i] = p[0].detach().float().cpu().numpy()
-                if unc_all is not None and unc_all[i] is not None and len(unc_all[i]):
-                    # NLF uncertainty (higher = worse) → score in [0,1]
-                    u = unc_all[i][0].detach().float().cpu().numpy()
-                    sc[i] = np.clip(1.0 - u, 0.0, 1.0)
-                else:
-                    sc[i] = np.isfinite(kp2d[i]).all(1).astype(np.float32)
-            if ncam >= 2:
-                kp2d_masked = kp2d.copy()
-                kp2d_masked[sc < self.det_thr] = np.nan
-                kp3d = triangulate_multiview(kp2d_masked, sc, Ks, Ds, Rs, Ts,
-                                             thr=self.det_thr)
-            else:
-                # MONO mode: no metric body 3D possible with a single view
-                kp3d = np.full((NMK, 3), np.nan, np.float32)
-            ms = (time.perf_counter() - t0) * 1e3
+            result = self.compute(frames, tss)
             with self._lock:
-                self.result = {"kp2d": kp2d, "scores": sc, "kp3d": kp3d,
-                               "boxes": pboxes,
-                               "frames_ts": tss, "ms": ms,
-                               "yolo_ms": tms.get("yolo_ms", 0.0),
-                               "nlf_ms": tms.get("nlf_ms", 0.0),
-                               "sync_ms": (max(tss) - min(tss)) * 1e3}
+                self.result = result
                 self.n += 1
+
+    def compute(self, frames, tss):
+        """One body inference over a synchronized frame set. The live run()
+        loop AND the offline replay driver both call this — identical math, so
+        offline results equal live exactly (only the frame SOURCE differs)."""
+        Ks, Ds, Rs, Ts = self.calib
+        ncam = len(self.cams)
+        W, H = self.size
+        for f in frames:
+            if f.shape[1] != W or f.shape[0] != H:
+                # hard error: silently resizing would break the calibration
+                # (K is for the capture resolution) → garbage triangulation
+                raise SystemExit(
+                    f"camera frame is {f.shape[1]}x{f.shape[0]}, expected "
+                    f"{W}x{H} (--cap-width/height must match the calib)")
+        t0 = time.perf_counter()
+        out, tms, _, boxes = self.est.estimate_from_frames(frames)
+        # locked person box per cam, xywh pixels (NaN when no detection)
+        pboxes = np.full((ncam, 4), np.nan, np.float32)
+        for i, b in enumerate(boxes):
+            if b is not None and len(b):
+                pboxes[i] = b[0].detach().float().cpu().numpy()
+        kp2d = np.full((ncam, NMK, 2), np.nan, np.float32)
+        sc = np.zeros((ncam, NMK), np.float32)
+        p2d_all = out["poses2d"]
+        unc_all = out.get("uncertainties") if hasattr(out, "get") else None
+        for i in range(ncam):
+            p = p2d_all[i]
+            if p is None or len(p) == 0 or p[0] is None:
+                continue                      # no (locked) person in this view
+            kp2d[i] = p[0].detach().float().cpu().numpy()
+            if unc_all is not None and unc_all[i] is not None and len(unc_all[i]):
+                # NLF uncertainty (higher = worse) → score in [0,1]
+                u = unc_all[i][0].detach().float().cpu().numpy()
+                sc[i] = np.clip(1.0 - u, 0.0, 1.0)
+            else:
+                sc[i] = np.isfinite(kp2d[i]).all(1).astype(np.float32)
+        if ncam >= 2:
+            kp2d_masked = kp2d.copy()
+            kp2d_masked[sc < self.det_thr] = np.nan
+            kp3d = triangulate_multiview(kp2d_masked, sc, Ks, Ds, Rs, Ts,
+                                         thr=self.det_thr)
+        else:
+            # MONO mode: no metric body 3D possible with a single view
+            kp3d = np.full((NMK, 3), np.nan, np.float32)
+        ms = (time.perf_counter() - t0) * 1e3
+        return {"kp2d": kp2d, "scores": sc, "kp3d": kp3d,
+                "boxes": pboxes,
+                "frames_ts": tss, "ms": ms,
+                "yolo_ms": tms.get("yolo_ms", 0.0),
+                "nlf_ms": tms.get("nlf_ms", 0.0),
+                "sync_ms": (max(tss) - min(tss)) * 1e3}
 
     def latest(self):
         with self._lock:
@@ -674,98 +690,106 @@ class HandWorker(threading.Thread):
         return a.hand_size_m if a.hand_size_m > 0 else None
 
     def run(self):
-        Ks, Ds, Rs, Ts = self.calib
-        ncam = len(Ks)
         last_body = -1
         while not _STOP.is_set():
             res, nb = self.body.latest()
             if res is None or nb == last_body:
                 time.sleep(0.003)
                 continue
-            t0 = time.perf_counter()
-            frames, k17s = {}, {}
+            frames = {}
             for v in self.views:
                 frame, _, _ = self.cams[v].latest()
-                if frame is None:
-                    continue
-                frames[v] = frame
-                # COCO-17 layout expected by the decoder step, synthesized
-                # from THIS view's NLF markers (wrist/elbow = lat+med midpoints)
-                k17s[v] = markers_to_coco17(res["kp2d"][v], res["scores"][v],
-                                            self.args.det_thr)
+                if frame is not None:
+                    frames[v] = frame
             if not frames:
                 time.sleep(0.003)
                 continue
-            # metric crop size from the triangulated 3D wrists: exact at any
-            # distance, sized to THIS subject's 3D forearm length
-            # (2D-heuristic fallback per hand/view when 3D missing)
-            sides = None
-            if self.args.hand_size_m > 0 or self.args.hand_size_frac > 0:
-                wr = _pair_mid(res["kp3d"], *R_WRIST_PAIR)
-                wl = _pair_mid(res["kp3d"], *L_WRIST_PAIR)
-                size_r = self._hand_size("r", wr,
-                                         _pair_mid(res["kp3d"], *R_ELBOW_PAIR))
-                size_l = self._hand_size("l", wl,
-                                         _pair_mid(res["kp3d"], *L_ELBOW_PAIR))
-                sides = {v: (_metric_side_px(wr, Ks[v], Rs[v], Ts[v], size_r),
-                             _metric_side_px(wl, Ks[v], Rs[v], Ts[v], size_l))
-                         for v in frames}
-            # per-hand top-K view selection (skipped when topk == 0)
-            want = rank = None
-            if self.topk:
-                want, rank = self._select(res, list(frames), sides)
-            # one batched forward for all selected (view, hand) crops
-            per, tms, crops = _hand_decoder_step_views(
-                self.model, frames, k17s, self.cam_ints, self.args, sides,
-                want)
+            result = self.compute(res, frames)
             last_body = nb
-
-            # per-hand MONO source = best-ranked view with an output (fixed
-            # hand-cam first when not selecting); fuse_goliath70 must rotate
-            # its offsets with THIS view's extrinsics → src_r/src_l exported
-            def _first(order, idx):
-                for v in order:
-                    out = per.get(v)
-                    if out is not None and out[idx] is not None:
-                        return v
-                return None
-            fallback = [self.hand_cam] + [v for v in self.views
-                                          if v != self.hand_cam]
-            src_r = _first((rank or {}).get("r", fallback), 0)
-            src_l = _first((rank or {}).get("l", fallback), 1)
-            kp_r, k3r, rbox = ((per[src_r][0], per[src_r][2], per[src_r][4])
-                               if src_r is not None else (None, None, None))
-            kp_l, k3l, lbox = ((per[src_l][1], per[src_l][3], per[src_l][5])
-                               if src_l is not None else (None, None, None))
-            # stack each hand's 2D across views and stereo-triangulate
-            kp2d_views = np.full((ncam, 42, 2), np.nan, np.float32)
-            for v, out in per.items():
-                if out[0] is not None:
-                    kp2d_views[v, :21] = out[0]
-                if out[1] is not None:
-                    kp2d_views[v, 21:] = out[1]
-            X_r = X_l = None
-            t1 = time.perf_counter()
-            if len(self.views) >= 2:
-                X_r = triangulate_with_reproj(kp2d_views[:, :21], Ks, Ds, Rs,
-                                              Ts, self.args.hand_reproj_thr)
-                X_l = triangulate_with_reproj(kp2d_views[:, 21:], Ks, Ds, Rs,
-                                              Ts, self.args.hand_reproj_thr)
-            tms["tri_ms"] = (time.perf_counter() - t1) * 1e3
-            ms = (time.perf_counter() - t0) * 1e3
             with self._lock:
-                self.result = {"kp_r": kp_r, "kp_l": kp_l,
-                               "k3r": k3r, "k3l": k3l, "ms": ms, "tms": tms,
-                               "crops": crops, "forearm": dict(self._forearm),
-                               "rbox": rbox, "lbox": lbox,
-                               "src_r": src_r, "src_l": src_l,
-                               "sel": ({h: sorted(self._sel_prev[h])
-                                        for h in ("r", "l")} if want else None),
-                               "X_r": X_r, "X_l": X_l,
-                               "kp2d_views": kp2d_views,
-                               "views": {v: (out[0], out[1], out[4], out[5])
-                                         for v, out in per.items()}}
+                self.result = result
                 self.n += 1
+
+    def compute(self, res, frames):
+        """Hand decoder + stereo triangulation for one body result. frames =
+        {view: image}. The live run() loop AND the offline replay driver both
+        call this — identical math, so offline hand quality equals live."""
+        Ks, Ds, Rs, Ts = self.calib
+        ncam = len(Ks)
+        t0 = time.perf_counter()
+        k17s = {}
+        for v in frames:
+            # COCO-17 layout expected by the decoder step, synthesized from
+            # THIS view's NLF markers (wrist/elbow = lat+med midpoints)
+            k17s[v] = markers_to_coco17(res["kp2d"][v], res["scores"][v],
+                                        self.args.det_thr)
+        # metric crop size from the triangulated 3D wrists: exact at any
+        # distance, sized to THIS subject's 3D forearm length
+        # (2D-heuristic fallback per hand/view when 3D missing)
+        sides = None
+        if self.args.hand_size_m > 0 or self.args.hand_size_frac > 0:
+            wr = _pair_mid(res["kp3d"], *R_WRIST_PAIR)
+            wl = _pair_mid(res["kp3d"], *L_WRIST_PAIR)
+            size_r = self._hand_size("r", wr,
+                                     _pair_mid(res["kp3d"], *R_ELBOW_PAIR))
+            size_l = self._hand_size("l", wl,
+                                     _pair_mid(res["kp3d"], *L_ELBOW_PAIR))
+            sides = {v: (_metric_side_px(wr, Ks[v], Rs[v], Ts[v], size_r),
+                         _metric_side_px(wl, Ks[v], Rs[v], Ts[v], size_l))
+                     for v in frames}
+        # per-hand top-K view selection (skipped when topk == 0)
+        want = rank = None
+        if self.topk:
+            want, rank = self._select(res, list(frames), sides)
+        # one batched forward for all selected (view, hand) crops
+        per, tms, crops = _hand_decoder_step_views(
+            self.model, frames, k17s, self.cam_ints, self.args, sides,
+            want)
+
+        # per-hand MONO source = best-ranked view with an output (fixed
+        # hand-cam first when not selecting); fuse_goliath70 must rotate
+        # its offsets with THIS view's extrinsics → src_r/src_l exported
+        def _first(order, idx):
+            for v in order:
+                out = per.get(v)
+                if out is not None and out[idx] is not None:
+                    return v
+            return None
+        fallback = [self.hand_cam] + [v for v in self.views
+                                      if v != self.hand_cam]
+        src_r = _first((rank or {}).get("r", fallback), 0)
+        src_l = _first((rank or {}).get("l", fallback), 1)
+        kp_r, k3r, rbox = ((per[src_r][0], per[src_r][2], per[src_r][4])
+                           if src_r is not None else (None, None, None))
+        kp_l, k3l, lbox = ((per[src_l][1], per[src_l][3], per[src_l][5])
+                           if src_l is not None else (None, None, None))
+        # stack each hand's 2D across views and stereo-triangulate
+        kp2d_views = np.full((ncam, 42, 2), np.nan, np.float32)
+        for v, out in per.items():
+            if out[0] is not None:
+                kp2d_views[v, :21] = out[0]
+            if out[1] is not None:
+                kp2d_views[v, 21:] = out[1]
+        X_r = X_l = None
+        t1 = time.perf_counter()
+        if len(self.views) >= 2:
+            X_r = triangulate_with_reproj(kp2d_views[:, :21], Ks, Ds, Rs,
+                                          Ts, self.args.hand_reproj_thr)
+            X_l = triangulate_with_reproj(kp2d_views[:, 21:], Ks, Ds, Rs,
+                                          Ts, self.args.hand_reproj_thr)
+        tms["tri_ms"] = (time.perf_counter() - t1) * 1e3
+        ms = (time.perf_counter() - t0) * 1e3
+        return {"kp_r": kp_r, "kp_l": kp_l,
+                "k3r": k3r, "k3l": k3l, "ms": ms, "tms": tms,
+                "crops": crops, "forearm": dict(self._forearm),
+                "rbox": rbox, "lbox": lbox,
+                "src_r": src_r, "src_l": src_l,
+                "sel": ({h: sorted(self._sel_prev[h])
+                         for h in ("r", "l")} if want else None),
+                "X_r": X_r, "X_l": X_l,
+                "kp2d_views": kp2d_views,
+                "views": {v: (out[0], out[1], out[4], out[5])
+                          for v, out in per.items()}}
 
     def latest(self):
         with self._lock:
@@ -1004,6 +1028,170 @@ def _full_to_tile(pts, box, out_hw, padding=0.9, aspect=0.75):
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 
+def run_offline(args, Ks, Ds, Rs, Ts, ncam, est, out_dir, R_world_handcam):
+    """OFFLINE replay: run the SAME body+hand inference on recorded video.
+
+    Reads cam{i}.mp4 from args.replay (i = position in --cams), processes every
+    frame in LOCKSTEP — for frame k it feeds all cameras' frame k to
+    BodyWorker.compute / HandWorker.compute (the exact methods the live loop
+    calls), so results are bit-for-bit the live pipeline minus the drop-old
+    real-time scheduling. No threads, no rerun, no TCP: pure batch. Writes the
+    same .npy files as the live path so downstream tooling is unchanged.
+    """
+    # open one video per camera position; index k is aligned across files
+    # (record_multi.py writes a frame to every camera in lockstep). --replay-cams
+    # remaps which recorded file feeds each calib position (default 0..ncam-1).
+    if args.replay_cams:
+        file_idx = [int(x) for x in args.replay_cams.split(",")]
+        if len(file_idx) != ncam:
+            raise SystemExit(f"--replay-cams has {len(file_idx)} entries but "
+                             f"--cams has {ncam} — they must match")
+    else:
+        file_idx = list(range(ncam))
+    paths = [os.path.join(args.replay, f"cam{i}.mp4") for i in file_idx]
+    caps = []
+    for pth in paths:
+        if not os.path.isfile(pth):
+            raise SystemExit(f"replay file missing: {pth} (record with "
+                             "stereo_calibration/record_multi.py; one cam{i}.mp4 "
+                             "per --cams position)")
+        cap = cv2.VideoCapture(pth)
+        if not cap.isOpened():
+            raise SystemExit(f"cannot open {pth}")
+        caps.append(cap)
+    counts = [int(c.get(cv2.CAP_PROP_FRAME_COUNT)) for c in caps]
+    w0 = int(caps[0].get(cv2.CAP_PROP_FRAME_WIDTH))
+    h0 = int(caps[0].get(cv2.CAP_PROP_FRAME_HEIGHT))
+    nframes = min(counts)
+    if args.replay_max_frames > 0:
+        nframes = min(nframes, args.replay_max_frames)
+    print(f"  replay: {ncam} files, {counts} frames each -> {nframes} usable, "
+          f"{w0}x{h0}")
+    if (w0, h0) != (args.cap_width, args.cap_height):
+        raise SystemExit(
+            f"recording is {w0}x{h0} but --cap-width/height is "
+            f"{args.cap_width}x{args.cap_height} — they MUST match the "
+            f"calibration resolution (K is resolution-dependent)")
+
+    # per-frame timestamps: use the recorder's if present, else synthesize
+    ts_path = os.path.join(args.replay, "timestamps.npy")
+    if os.path.isfile(ts_path):
+        ts_all = np.load(ts_path)
+        if ts_all.ndim == 1:
+            ts_all = np.repeat(ts_all[:, None], ncam, axis=1)
+        print(f"  using recorded timestamps ({ts_path})")
+    else:
+        fps = 30.0
+        ts_all = (np.arange(nframes)[:, None] / fps).repeat(ncam, axis=1)
+        print("  no timestamps.npy — synthesizing at 30 fps (sync spread = 0)")
+
+    # workers WITHOUT camera threads: placeholder cam list gives them ncam +
+    # nothing else (compute() takes frames explicitly; run() is never called)
+    placeholder = list(range(ncam))
+    body = BodyWorker(placeholder, Ks, Ds, Rs, Ts, args.det_thr, args)
+    hand_views = ([args.hand_cam] if (args.mono_hands or ncam < 2)
+                  else list(range(ncam)))
+    hands = HandWorker(placeholder, body, est.model, (Ks, Ds, Rs, Ts), args,
+                       hand_views, args.hand_cam)
+    if len(hand_views) >= 2:
+        print(f"  STEREO hands offline: decoder on views {hand_views}")
+
+    rec = None
+    if not args.no_record:
+        rec = {"b3d": [], "b2d": [], "h2d": [], "h2dv": [], "hsrc": [],
+               "g70": [], "ts": []}
+    vw = None
+
+    print(f"[offline] processing {nframes} frames (Ctrl+C to stop early "
+          "and keep what's done)...")
+    t_start = time.time()
+    done = 0
+    try:
+        for k in range(nframes):
+            frames = []
+            ok = True
+            for c in caps:
+                r, f = c.read()
+                if not r or f is None:
+                    ok = False
+                    break
+                if args.rotate180:
+                    f = cv2.rotate(f, cv2.ROTATE_180)
+                frames.append(f)
+            if not ok:
+                print(f"  short read at frame {k} — stopping")
+                break
+            row = ts_all[min(k, len(ts_all) - 1)]
+            # pick the timestamp columns for the files actually loaded
+            tss = [float(row[fi if fi < len(row) else 0]) for fi in file_idx]
+            res = body.compute(frames, tss)
+            hres = hands.compute(res, {v: frames[v] for v in hand_views})
+
+            Rw_r = Rw_l = R_world_handcam
+            if hres.get("src_r") is not None:
+                Rw_r = Rs[hres["src_r"]].T
+            if hres.get("src_l") is not None:
+                Rw_l = Rs[hres["src_l"]].T
+            g70 = fuse_goliath70(res["kp3d"], hres, Rw_r, Rw_l)
+
+            if rec is not None:
+                rec["b3d"].append(res["kp3d"])
+                rec["b2d"].append(res["kp2d"])
+                h2d = np.full((42, 2), np.nan, np.float32)
+                if hres["kp_r"] is not None:
+                    h2d[:21] = hres["kp_r"]
+                if hres["kp_l"] is not None:
+                    h2d[21:] = hres["kp_l"]
+                rec["h2d"].append(h2d)
+                rec["h2dv"].append(hres["kp2d_views"])
+                rec["hsrc"].append([
+                    -1 if hres.get(kk) is None else hres[kk]
+                    for kk in ("src_r", "src_l")])
+                rec["g70"].append(g70)
+                rec["ts"].append(tss[0])
+
+            if args.save_video:
+                if vw is None:
+                    vw = cv2.VideoWriter(
+                        os.path.join(out_dir, "overlay_cam0.mp4"),
+                        cv2.VideoWriter_fourcc(*"mp4v"), 25, (w0, h0))
+                img = draw_markers(frames[0].copy(), res["kp2d"][0],
+                                   res["scores"][0], args.det_thr)
+                if args.reproj_hands and ncam >= 2:
+                    for sl in (slice(21, 42), slice(42, 63)):
+                        rp = reproject_points(g70[sl], Ks[0], Ds[0], Rs[0], Ts[0])
+                        img = draw_hand_skeleton(img, rp, hollow=True, line_w=1)
+                vw.write(img)
+
+            done = k + 1
+            if done % 60 == 0 or done == nframes:
+                el = time.time() - t_start
+                nr = (int(np.isfinite(hres["X_r"]).all(1).sum())
+                      if hres.get("X_r") is not None else -1)
+                nl = (int(np.isfinite(hres["X_l"]).all(1).sum())
+                      if hres.get("X_l") is not None else -1)
+                print(f"  {done}/{nframes}  {done / max(el, 1e-6):.1f} fps  "
+                      f"body {res['ms']:.0f}ms hands {hres['ms']:.0f}ms  "
+                      f"stereo jts R{nr} L{nl}", flush=True)
+    except KeyboardInterrupt:
+        print("\n  interrupted — saving processed frames")
+    finally:
+        for c in caps:
+            c.release()
+        if vw is not None:
+            vw.release()
+        if rec is not None and rec["ts"]:
+            np.save(os.path.join(out_dir, "markers_3d.npy"), np.stack(rec["b3d"]))
+            np.save(os.path.join(out_dir, "markers_2d.npy"), np.stack(rec["b2d"]))
+            np.save(os.path.join(out_dir, "hands_2d.npy"), np.stack(rec["h2d"]))
+            np.save(os.path.join(out_dir, "hands_2d_views.npy"), np.stack(rec["h2dv"]))
+            np.save(os.path.join(out_dir, "hands_src.npy"),
+                    np.asarray(rec["hsrc"], np.int16))
+            np.save(os.path.join(out_dir, "goliath70_3d.npy"), np.stack(rec["g70"]))
+            np.save(os.path.join(out_dir, "timestamps.npy"), np.asarray(rec["ts"]))
+            print(f"  saved {len(rec['ts'])} frames to {out_dir}/")
+
+
 def main():
     p = argparse.ArgumentParser(description="NLF markers (multi-cam metric) + SAM hand decoder")
     p.add_argument("--cams", default="0",
@@ -1113,6 +1301,25 @@ def main():
     p.add_argument("--output_dir", default="")
     p.add_argument("--no-record", action="store_true")
     p.add_argument("--save-video", action="store_true")
+    p.add_argument("--replay", default="",
+                   help="OFFLINE mode: read frames from a recording dir "
+                        "(cam{i}.mp4 for each --cams position, produced by "
+                        "stereo_calibration/record_multi.py) instead of live "
+                        "cameras. Processes EVERY frame in lockstep (no "
+                        "drop-old), so 3D quality equals the live path; runs "
+                        "as fast as the GPU allows, not real time. Writes the "
+                        "same .npy outputs. --cams then indexes recorded files, "
+                        "not devices; frames are used as stored (do NOT pass "
+                        "--rotate180 if the flip was baked at record time).")
+    p.add_argument("--replay-max-frames", type=int, default=0,
+                   help="[replay] stop after N frames (0 = all) — quick checks")
+    p.add_argument("--replay-cams", default="",
+                   help="[replay] which recorded cam{n}.mp4 files map to calib "
+                        "positions 0,1,... (comma-separated, len = --cams). "
+                        "Default = 0,1,..,ncam-1. Use it to run the 2-cam hand "
+                        "pipeline on a non-{0,1} pair, e.g. --cams 0,1 "
+                        "--calib <multi_to_stereo --pair 2,3 output> "
+                        "--replay-cams 2,3")
     p.add_argument("--emit-hand-port", type=int, default=0,
                    help="if >0: stream the RIGHT hand 21x3 wrist-relative 3D over "
                         "TCP (for orca_teleop/retarget_mpc.py --listen)")
@@ -1150,8 +1357,10 @@ def main():
                "hand_ms prep_ms fwd_ms post_ms tri_ms stereo_R stereo_L\n")
     print(f"  timing log: {os.path.join(out_dir, 'timing.log')}")
 
-    print("[1/4] Rerun viewer...")
-    viz = Viz(args.rerun_mode, args.rerun_grpc_port, args.rerun_web_port, ncam, out_dir)
+    viz = None
+    if not args.replay:
+        print("[1/4] Rerun viewer...")
+        viz = Viz(args.rerun_mode, args.rerun_grpc_port, args.rerun_web_port, ncam, out_dir)
 
     print("[2/4] Loading SAM-3D-Body (hand decoder only — no YOLO, no MoGe2)...")
     est = setup_sam_3d_body(
@@ -1160,6 +1369,11 @@ def main():
         detector_name="", fov_name="", device="cuda",
     )
     R_world_handcam = Rs[args.hand_cam].T          # cam→world (world = cam0 frame)
+
+    if args.replay:
+        print("[3/3] OFFLINE replay (no live cameras, no rerun)...")
+        run_offline(args, Ks, Ds, Rs, Ts, ncam, est, out_dir, R_world_handcam)
+        return
 
     print("[3/4] Cameras + workers (NLF warmup ~10 s)...")
     cams = [CamThread(i, args.cap_width, args.cap_height,

@@ -31,6 +31,10 @@ output_*/
 *.npy
 *.npz
 
+# ── Capture / recording data (calibration frames, recorded takes) ────
+stereo_calibration/images/
+recordings/
+
 # ── Experiment artifacts ─────────────────────────────────────────────
 mhr2smpl/experiments/
 mhr2smpl/output_visualization/
