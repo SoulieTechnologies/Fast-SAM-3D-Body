@@ -21,10 +21,13 @@ fastsam3d/
 ├── stream_demo.py             # TCP keypoint emitter + TRT/speed env flags (imported first)
 ├── rerun_demo.py              # Rerun UI demo (body skeleton + hand overlay + 3D)
 ├── run_ik_live_rerun.py       # live IK/retargeting feed for the Rerun demo
-├── body_hand_decoder_extractor.py, visualize_skeleton_video.py, hand_view_select.py
-│                              # libraries used by the entries above (keep beside them)
+├── body_hand_decoder_extractor.py   # SAM hand-decoder batching (torch; used by rerun_demo)
 ├── extract_two_cameras.py, extract_dualgpu.py
 │                              # offline stereo hand extraction (older path)
+│
+├── utils/                     # pure shared libraries imported by the entries above
+│   ├── hand_view_select.py    # per-hand best-view selection (numpy only)
+│   └── visualize_skeleton_video.py   # skeleton drawing on frames (cv2 + numpy)
 │
 ├── stereo_calibration/        # N-camera calibration + synchronized recording
 │   ├── capture_calibration_multi.py / calibrate_multi.py   # ChArUco → multi_params.npz
